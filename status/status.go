@@ -77,7 +77,8 @@ func (s *Status) Proto() *spb.Status {
 	if s == nil {
 		return nil
 	}
-	return proto.Clone(s.s).(*spb.Status)
+	return s.s
+	// return proto.Clone(s.s).(*spb.Status)
 }
 
 // Err returns an immutable error representing s; returns nil if s.Code() is
@@ -116,7 +117,8 @@ func ErrorProto(s *spb.Status) error {
 
 // FromProto returns a Status representing s.
 func FromProto(s *spb.Status) *Status {
-	return &Status{s: proto.Clone(s).(*spb.Status)}
+	return &Status{s: s}
+	// return &Status{s: proto.Clone(s).(*spb.Status)}
 }
 
 // FromError returns a Status representing err if it was produced from this
