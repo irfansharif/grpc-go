@@ -23,7 +23,6 @@ import (
 	"errors"
 	"io"
 	"math"
-	"math/rand"
 	"net"
 	"strconv"
 	"sync"
@@ -44,12 +43,8 @@ import (
 	"google.golang.org/grpc/tap"
 )
 
-// ErrIllegalHeaderWrite indicates that setting header is illegal because of
-// the stream's state.
-var ErrIllegalHeaderWrite = errors.New("transport: the stream is done or WriteHeader was already called")
-
-// http2Server implements the ServerTransport interface with HTTP2.
-type http2Server struct {
+// http2ServerOptimized implements the ServerTransport interface with HTTP2.
+type http2ServerOptimized struct {
 	ctx         context.Context
 	conn        net.Conn
 	remoteAddr  net.Addr
@@ -118,9 +113,9 @@ type http2Server struct {
 	idle time.Time
 }
 
-// newHTTP2Server constructs a ServerTransport based on HTTP2. ConnectionError is
+// newHTTP2ServerOptimized constructs a ServerTransport based on HTTP2. ConnectionError is
 // returned if something goes wrong.
-func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err error) {
+func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTransport, err error) {
 	framer := newFramer(conn)
 	// Send initial settings as connection preface to client.
 	var isettings []http2.Setting
@@ -183,7 +178,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 		kep.MinTime = defaultKeepalivePolicyMinTime
 	}
 	var buf bytes.Buffer
-	t := &http2Server{
+	t := &http2ServerOptimized{
 		ctx:               context.Background(),
 		conn:              conn,
 		remoteAddr:        conn.RemoteAddr(),
@@ -229,7 +224,7 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 }
 
 // operateHeader takes action on the decoded headers.
-func (t *http2Server) operateHeaders(frame *http2.MetaHeadersFrame, handle func(*Stream), traceCtx func(context.Context, string) context.Context) (close bool) {
+func (t *http2ServerOptimized) operateHeaders(frame *http2.MetaHeadersFrame, handle func(*Stream), traceCtx func(context.Context, string) context.Context) (close bool) {
 	buf := newRecvBuffer()
 	s := &Stream{
 		id:  frame.Header().StreamID,
@@ -292,7 +287,7 @@ func (t *http2Server) operateHeaders(frame *http2.MetaHeadersFrame, handle func(
 		}
 		s.ctx, err = t.inTapHandle(s.ctx, info)
 		if err != nil {
-			warningf("transport: http2Server.operateHeaders got an error from InTapHandle: %v", err)
+			warningf("transport: http2ServerOptimized.operateHeaders got an error from InTapHandle: %v", err)
 			t.controlBuf.put(&resetStream{s.id, http2.ErrCodeRefusedStream})
 			return
 		}
@@ -310,7 +305,7 @@ func (t *http2Server) operateHeaders(frame *http2.MetaHeadersFrame, handle func(
 	if s.id%2 != 1 || s.id <= t.maxStreamID {
 		t.mu.Unlock()
 		// illegal gRPC stream id.
-		errorf("transport: http2Server.HandleStreams received an illegal stream id: %v", s.id)
+		errorf("transport: http2ServerOptimized.HandleStreams received an illegal stream id: %v", s.id)
 		return true
 	}
 	t.maxStreamID = s.id
@@ -342,19 +337,19 @@ func (t *http2Server) operateHeaders(frame *http2.MetaHeadersFrame, handle func(
 // HandleStreams receives incoming streams using the given handler. This is
 // typically run in a separate goroutine.
 // traceCtx attaches trace to ctx and returns the new context.
-func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.Context, string) context.Context) {
+func (t *http2ServerOptimized) HandleStreams(handle func(*Stream), traceCtx func(context.Context, string) context.Context) {
 	// Check the validity of client preface.
 	preface := make([]byte, len(clientPreface))
 	if _, err := io.ReadFull(t.conn, preface); err != nil {
 		// Only log if it isn't a simple tcp accept check (ie: tcp balancer doing open/close socket)
 		if err != io.EOF {
-			errorf("transport: http2Server.HandleStreams failed to receive the preface from client: %v", err)
+			errorf("transport: http2ServerOptimized.HandleStreams failed to receive the preface from client: %v", err)
 		}
 		t.Close()
 		return
 	}
 	if !bytes.Equal(preface, clientPreface) {
-		errorf("transport: http2Server.HandleStreams received bogus greeting from client: %q", preface)
+		errorf("transport: http2ServerOptimized.HandleStreams received bogus greeting from client: %q", preface)
 		t.Close()
 		return
 	}
@@ -365,14 +360,14 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 		return
 	}
 	if err != nil {
-		errorf("transport: http2Server.HandleStreams failed to read initial settings frame: %v", err)
+		errorf("transport: http2ServerOptimized.HandleStreams failed to read initial settings frame: %v", err)
 		t.Close()
 		return
 	}
 	atomic.StoreUint32(&t.activity, 1)
 	sf, ok := frame.(*http2.SettingsFrame)
 	if !ok {
-		errorf("transport: http2Server.HandleStreams saw invalid preface type %T from client", frame)
+		errorf("transport: http2ServerOptimized.HandleStreams saw invalid preface type %T from client", frame)
 		t.Close()
 		return
 	}
@@ -396,7 +391,7 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 				t.Close()
 				return
 			}
-			warningf("transport: http2Server.HandleStreams failed to read frame: %v", err)
+			warningf("transport: http2ServerOptimized.HandleStreams failed to read frame: %v", err)
 			t.Close()
 			return
 		}
@@ -419,12 +414,12 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 		case *http2.GoAwayFrame:
 			// TODO: Handle GoAway from the client appropriately.
 		default:
-			errorf("transport: http2Server.HandleStreams found unhandled frame type %v.", frame)
+			errorf("transport: http2ServerOptimized.HandleStreams found unhandled frame type %v.", frame)
 		}
 	}
 }
 
-func (t *http2Server) getStream(f http2.Frame) (*Stream, bool) {
+func (t *http2ServerOptimized) getStream(f http2.Frame) (*Stream, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.activeStreams == nil {
@@ -442,7 +437,7 @@ func (t *http2Server) getStream(f http2.Frame) (*Stream, bool) {
 // adjustWindow sends out extra window update over the initial window size
 // of stream if the application is requesting data larger in size than
 // the window.
-func (t *http2Server) adjustWindow(s *Stream, n uint32) {
+func (t *http2ServerOptimized) adjustWindow(s *Stream, n uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == streamDone {
@@ -459,7 +454,7 @@ func (t *http2Server) adjustWindow(s *Stream, n uint32) {
 // updateWindow adjusts the inbound quota for the stream and the transport.
 // Window updates will deliver to the controller for sending when
 // the cumulative quota exceeds the corresponding threshold.
-func (t *http2Server) updateWindow(s *Stream, n uint32) {
+func (t *http2ServerOptimized) updateWindow(s *Stream, n uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == streamDone {
@@ -476,7 +471,7 @@ func (t *http2Server) updateWindow(s *Stream, n uint32) {
 // updateFlowControl updates the incoming flow control windows
 // for the transport and the stream based on the current bdp
 // estimation.
-func (t *http2Server) updateFlowControl(n uint32) {
+func (t *http2ServerOptimized) updateFlowControl(n uint32) {
 	t.mu.Lock()
 	for _, s := range t.activeStreams {
 		s.fc.newLimit(n)
@@ -496,7 +491,7 @@ func (t *http2Server) updateFlowControl(n uint32) {
 
 }
 
-func (t *http2Server) handleData(f *http2.DataFrame) {
+func (t *http2ServerOptimized) handleData(f *http2.DataFrame) {
 	size := f.Header().Length
 	var sendBDPPing bool
 	if t.bdpEst != nil {
@@ -518,7 +513,7 @@ func (t *http2Server) handleData(f *http2.DataFrame) {
 		t.controlBuf.put(bdpPing)
 	} else {
 		if err := t.fc.onData(uint32(size)); err != nil {
-			errorf("transport: http2Server %v", err)
+			errorf("transport: http2ServerOptimized %v", err)
 			t.Close()
 			return
 		}
@@ -569,7 +564,7 @@ func (t *http2Server) handleData(f *http2.DataFrame) {
 	}
 }
 
-func (t *http2Server) handleRSTStream(f *http2.RSTStreamFrame) {
+func (t *http2ServerOptimized) handleRSTStream(f *http2.RSTStreamFrame) {
 	s, ok := t.getStream(f)
 	if !ok {
 		return
@@ -577,7 +572,7 @@ func (t *http2Server) handleRSTStream(f *http2.RSTStreamFrame) {
 	t.closeStream(s)
 }
 
-func (t *http2Server) handleSettings(f *http2.SettingsFrame) {
+func (t *http2ServerOptimized) handleSettings(f *http2.SettingsFrame) {
 	if f.IsAck() {
 		return
 	}
@@ -590,12 +585,7 @@ func (t *http2Server) handleSettings(f *http2.SettingsFrame) {
 	t.controlBuf.put(&settings{ack: true, ss: ss})
 }
 
-const (
-	maxPingStrikes     = 2
-	defaultPingTimeout = 2 * time.Hour
-)
-
-func (t *http2Server) handlePing(f *http2.PingFrame) {
+func (t *http2ServerOptimized) handlePing(f *http2.PingFrame) {
 	if f.IsAck() {
 		if f.Data == goAwayPing.data && t.drainChan != nil {
 			close(t.drainChan)
@@ -644,7 +634,7 @@ func (t *http2Server) handlePing(f *http2.PingFrame) {
 	}
 }
 
-func (t *http2Server) handleWindowUpdate(f *http2.WindowUpdateFrame) {
+func (t *http2ServerOptimized) handleWindowUpdate(f *http2.WindowUpdateFrame) {
 	id := f.Header().StreamID
 	incr := f.Increment
 	if id == 0 {
@@ -656,7 +646,7 @@ func (t *http2Server) handleWindowUpdate(f *http2.WindowUpdateFrame) {
 	}
 }
 
-func (t *http2Server) writeHeaders(s *Stream, b *bytes.Buffer, endStream bool) error {
+func (t *http2ServerOptimized) writeHeaders(s *Stream, b *bytes.Buffer, endStream bool) error {
 	first := true
 	endHeaders := false
 	var err error
@@ -682,10 +672,12 @@ func (t *http2Server) writeHeaders(s *Stream, b *bytes.Buffer, endStream bool) e
 				EndStream:     endStream,
 				EndHeaders:    endHeaders,
 			}
-			err = t.framer.writeHeaders(endHeaders, p)
+			// Don't flush, eventually we'll call WriteStatus.
+			err = t.framer.writeHeaders(endHeaders && false, p)
 			first = false
 		} else {
-			err = t.framer.writeContinuation(endHeaders, s.id, endHeaders, b.Next(size))
+			// Don't flush, eventually we'll call WriteStatus.
+			err = t.framer.writeContinuation(endHeaders && false, s.id, endHeaders, b.Next(size))
 		}
 		if err != nil {
 			t.Close()
@@ -696,7 +688,7 @@ func (t *http2Server) writeHeaders(s *Stream, b *bytes.Buffer, endStream bool) e
 }
 
 // WriteHeader sends the header metadata md back to the client.
-func (t *http2Server) WriteHeader(s *Stream, md metadata.MD) error {
+func (t *http2ServerOptimized) WriteHeader(s *Stream, md metadata.MD) error {
 	s.mu.Lock()
 	if s.headerOk || s.state == streamDone {
 		s.mu.Unlock()
@@ -748,7 +740,8 @@ func (t *http2Server) WriteHeader(s *Stream, md metadata.MD) error {
 // There is no further I/O operations being able to perform on this stream.
 // TODO(zhaoq): Now it indicates the end of entire stream. Revisit if early
 // OK is adopted.
-func (t *http2Server) WriteStatus(s *Stream, st *status.Status) error {
+// FIXME(irfansharif): Must always flush, even during errors?. Panic in pruned codepaths.
+func (t *http2ServerOptimized) WriteStatus(s *Stream, st *status.Status) error {
 	var headersSent, hasHeader bool
 	s.mu.Lock()
 	if s.state == streamDone {
@@ -808,6 +801,9 @@ func (t *http2Server) WriteStatus(s *Stream, st *status.Status) error {
 		t.Close()
 		return err
 	}
+	// NOTE: This is the final flush.
+	t.framer.writer.Flush()
+
 	if t.stats != nil {
 		outTrailer := &stats.OutTrailer{
 			WireLength: bufLen,
@@ -819,9 +815,10 @@ func (t *http2Server) WriteStatus(s *Stream, st *status.Status) error {
 	return nil
 }
 
-// Write converts the data into HTTP2 data frame and sends it out. Non-nil error
-// is returns if it fails (e.g., framing error, transport error).
-func (t *http2Server) Write(s *Stream, data []byte, opts *Options) (err error) {
+// Write converts the data into HTTP2 data frame and sends it out.
+// Non-nil error is returns if it fails (e.g., framing error, transport error).
+// Will do so with minimal flushes.
+func (t *http2ServerOptimized) Write(s *Stream, data []byte, opts *Options) (err error) {
 	// TODO(zhaoq): Support multi-writers for a single stream.
 	var writeHeaderFrame bool
 	s.mu.Lock()
@@ -920,6 +917,9 @@ func (t *http2Server) Write(s *Stream, data []byte, opts *Options) (err error) {
 			// message and the caller is the only writer at this moment.
 			forceFlush = true
 		}
+		// We will not flush here. WriteStatus gets called eventually, only
+		// then will we do so.
+		forceFlush = false
 		// Reset ping strikes when sending data since this might cause
 		// the peer to send ping.
 		atomic.StoreUint32(&t.resetPingStrikes, 1)
@@ -933,7 +933,7 @@ func (t *http2Server) Write(s *Stream, data []byte, opts *Options) (err error) {
 	}
 }
 
-func (t *http2Server) applySettings(ss []http2.Setting) {
+func (t *http2ServerOptimized) applySettings(ss []http2.Setting) {
 	for _, s := range ss {
 		if s.ID == http2.SettingInitialWindowSize {
 			t.mu.Lock()
@@ -954,7 +954,7 @@ func (t *http2Server) applySettings(ss []http2.Setting) {
 // 3. Forcibly closes a connection after an additive period of keepalive.MaxConnectionAgeGrace over keepalive.MaxConnectionAge.
 // 4. Makes sure a connection is alive by sending pings with a frequency of keepalive.Time and closes a non-responsive connection
 // after an additional duration of keepalive.Timeout.
-func (t *http2Server) keepalive() {
+func (t *http2ServerOptimized) keepalive() {
 	p := &ping{}
 	var pingSent bool
 	maxIdle := time.NewTimer(t.kp.MaxConnectionIdle)
@@ -1028,11 +1028,9 @@ func (t *http2Server) keepalive() {
 	}
 }
 
-var goAwayPing = &ping{data: [8]byte{1, 6, 1, 8, 0, 3, 3, 9}}
-
 // controller running in a separate goroutine takes charge of sending control
 // frames (e.g., window update, reset stream, setting, etc.) to the server.
-func (t *http2Server) controller() {
+func (t *http2ServerOptimized) controller() {
 	for {
 		select {
 		case i := <-t.controlBuf.get():
@@ -1099,7 +1097,7 @@ func (t *http2Server) controller() {
 					}
 					t.framer.writePing(true, i.ack, i.data)
 				default:
-					errorf("transport: http2Server.controller got unexpected item type %v\n", i)
+					errorf("transport: http2ServerOptimized.controller got unexpected item type %v\n", i)
 				}
 				t.writableChan <- 0
 				continue
@@ -1112,10 +1110,10 @@ func (t *http2Server) controller() {
 	}
 }
 
-// Close starts shutting down the http2Server transport.
+// Close starts shutting down the http2ServerOptimized transport.
 // TODO(zhaoq): Now the destruction is not blocked on any pending streams. This
 // could cause some resource issue. Revisit this later.
-func (t *http2Server) Close() (err error) {
+func (t *http2ServerOptimized) Close() (err error) {
 	t.mu.Lock()
 	if t.state == closing {
 		t.mu.Unlock()
@@ -1140,7 +1138,7 @@ func (t *http2Server) Close() (err error) {
 
 // closeStream clears the footprint of a stream when the stream is not needed
 // any more.
-func (t *http2Server) closeStream(s *Stream) {
+func (t *http2ServerOptimized) closeStream(s *Stream) {
 	t.mu.Lock()
 	delete(t.activeStreams, s.id)
 	if len(t.activeStreams) == 0 {
@@ -1163,15 +1161,15 @@ func (t *http2Server) closeStream(s *Stream) {
 	s.mu.Unlock()
 }
 
-func (t *http2Server) RemoteAddr() net.Addr {
+func (t *http2ServerOptimized) RemoteAddr() net.Addr {
 	return t.remoteAddr
 }
 
-func (t *http2Server) Drain() {
+func (t *http2ServerOptimized) Drain() {
 	t.drain(http2.ErrCodeNo, []byte{})
 }
 
-func (t *http2Server) drain(code http2.ErrCode, debugData []byte) {
+func (t *http2ServerOptimized) drain(code http2.ErrCode, debugData []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.drainChan != nil {
@@ -1179,16 +1177,4 @@ func (t *http2Server) drain(code http2.ErrCode, debugData []byte) {
 	}
 	t.drainChan = make(chan struct{})
 	t.controlBuf.put(&goAway{code: code, debugData: debugData, headsUp: true})
-}
-
-var rgen = rand.New(rand.NewSource(time.Now().UnixNano()))
-
-func getJitter(v time.Duration) time.Duration {
-	if v == infinity {
-		return 0
-	}
-	// Generate a jitter between +/- 10% of the value.
-	r := int64(v / 10)
-	j := rgen.Int63n(2*r) - r
-	return time.Duration(j)
 }
