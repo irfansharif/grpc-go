@@ -776,9 +776,7 @@ func (t *http2Client) Write(s *Stream, data []byte, opts *Options) error {
 			return connectionErrorf(true, err, "transport: %v", err)
 		}
 		p = nil
-		if t.framer.adjustNumWriters(-1) == 0 {
-			t.framer.flushWrite()
-		}
+		t.framer.adjustNumWriters(-1)
 		t.writableChan <- 0
 		if r.Len() == 0 {
 			break

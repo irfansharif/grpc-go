@@ -656,6 +656,47 @@ func (t *http2Server) handleWindowUpdate(f *http2.WindowUpdateFrame) {
 	}
 }
 
+func (t *http2Server) writeHeadersOptimized(s *Stream, b *bytes.Buffer, endStream bool) error {
+	first := true
+	endHeaders := false
+	var err error
+	defer func() {
+		if err == nil {
+			// Reset ping strikes when seding headers since that might cause the
+			// peer to send ping.
+			atomic.StoreUint32(&t.resetPingStrikes, 1)
+		}
+	}()
+	// Sends the headers in a single batch.
+	for !endHeaders {
+		size := t.hBuf.Len()
+		if size > http2MaxFrameLen {
+			size = http2MaxFrameLen
+		} else {
+			endHeaders = true
+		}
+		if first {
+			p := http2.HeadersFrameParam{
+				StreamID:      s.id,
+				BlockFragment: b.Next(size),
+				EndStream:     endStream,
+				EndHeaders:    endHeaders,
+			}
+			// Don't flush, eventually we'll call WriteStatus.
+			err = t.framer.writeHeaders(endHeaders && false, p)
+			first = false
+		} else {
+			// Don't flush, eventually we'll call WriteStatus.
+			err = t.framer.writeContinuation(endHeaders && false, s.id, endHeaders, b.Next(size))
+		}
+		if err != nil {
+			t.Close()
+			return connectionErrorf(true, err, "transport: %v", err)
+		}
+	}
+	return nil
+}
+
 func (t *http2Server) writeHeaders(s *Stream, b *bytes.Buffer, endStream bool) error {
 	first := true
 	endHeaders := false
@@ -695,7 +736,56 @@ func (t *http2Server) writeHeaders(s *Stream, b *bytes.Buffer, endStream bool) e
 	return nil
 }
 
-// WriteHeader sends the header metedata md back to the client.
+// WriteHeaderOptimized sends the header metadata md back to the client.
+func (t *http2Server) WriteHeaderOptimized(s *Stream, md metadata.MD) error {
+	s.mu.Lock()
+	if s.headerOk || s.state == streamDone {
+		s.mu.Unlock()
+		return ErrIllegalHeaderWrite
+	}
+	s.headerOk = true
+	if md.Len() > 0 {
+		if s.header.Len() > 0 {
+			s.header = metadata.Join(s.header, md)
+		} else {
+			s.header = md
+		}
+	}
+	md = s.header
+	s.mu.Unlock()
+	if _, err := wait(s.ctx, nil, nil, t.shutdownChan, t.writableChan); err != nil {
+		return err
+	}
+	t.hBuf.Reset()
+	t.hEnc.WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
+	t.hEnc.WriteField(hpack.HeaderField{Name: "content-type", Value: "application/grpc"})
+	if s.sendCompress != "" {
+		t.hEnc.WriteField(hpack.HeaderField{Name: "grpc-encoding", Value: s.sendCompress})
+	}
+	for k, vv := range md {
+		if isReservedHeader(k) {
+			// Clients don't tolerate reading restricted headers after some non restricted ones were sent.
+			continue
+		}
+		for _, v := range vv {
+			t.hEnc.WriteField(hpack.HeaderField{Name: k, Value: encodeMetadataHeader(k, v)})
+		}
+	}
+	bufLen := t.hBuf.Len()
+	if err := t.writeHeadersOptimized(s, t.hBuf, false); err != nil {
+		return err
+	}
+	if t.stats != nil {
+		outHeader := &stats.OutHeader{
+			WireLength: bufLen,
+		}
+		t.stats.HandleRPC(s.Context(), outHeader)
+	}
+	t.writableChan <- 0
+	return nil
+}
+
+// WriteHeader sends the header metadata md back to the client.
 func (t *http2Server) WriteHeader(s *Stream, md metadata.MD) error {
 	s.mu.Lock()
 	if s.headerOk || s.state == streamDone {
@@ -740,6 +830,85 @@ func (t *http2Server) WriteHeader(s *Stream, md metadata.MD) error {
 		}
 		t.stats.HandleRPC(s.Context(), outHeader)
 	}
+	t.writableChan <- 0
+	return nil
+}
+
+// WriteStatusOptimized sends stream status to the client and terminates the stream.
+// There is no further I/O operations being able to perform on this stream.
+// TODO(zhaoq): Now it indicates the end of entire stream. Revisit if early
+// OK is adopted.
+// FIXME(irfansharif): Must always flush, even during errors?. Panic in pruned codepaths.
+func (t *http2Server) WriteStatusOptimized(s *Stream, st *status.Status) error {
+	var headersSent, hasHeader bool
+	s.mu.Lock()
+	if s.state == streamDone {
+		s.mu.Unlock()
+		return nil
+	}
+	if s.headerOk {
+		headersSent = true
+	}
+	if s.header.Len() > 0 {
+		hasHeader = true
+	}
+	s.mu.Unlock()
+
+	if !headersSent && hasHeader {
+		t.WriteHeaderOptimized(s, nil)
+		headersSent = true
+	}
+
+	if _, err := wait(s.ctx, nil, nil, t.shutdownChan, t.writableChan); err != nil {
+		return err
+	}
+	t.hBuf.Reset()
+	if !headersSent {
+		t.hEnc.WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
+		t.hEnc.WriteField(hpack.HeaderField{Name: "content-type", Value: "application/grpc"})
+	}
+	t.hEnc.WriteField(
+		hpack.HeaderField{
+			Name:  "grpc-status",
+			Value: strconv.Itoa(int(st.Code())),
+		})
+	t.hEnc.WriteField(hpack.HeaderField{Name: "grpc-message", Value: encodeGrpcMessage(st.Message())})
+
+	if p := st.Proto(); p != nil && len(p.Details) > 0 {
+		stBytes, err := proto.Marshal(p)
+		if err != nil {
+			// TODO: return error instead, when callers are able to handle it.
+			panic(err)
+		}
+
+		t.hEnc.WriteField(hpack.HeaderField{Name: "grpc-status-details-bin", Value: encodeBinHeader(stBytes)})
+	}
+
+	// Attach the trailer metadata.
+	for k, vv := range s.trailer {
+		// Clients don't tolerate reading restricted headers after some non restricted ones were sent.
+		if isReservedHeader(k) {
+			continue
+		}
+		for _, v := range vv {
+			t.hEnc.WriteField(hpack.HeaderField{Name: k, Value: encodeMetadataHeader(k, v)})
+		}
+	}
+	bufLen := t.hBuf.Len()
+	if err := t.writeHeadersOptimized(s, t.hBuf, true); err != nil {
+		t.Close()
+		return err
+	}
+	// NOTE: This is the final flush.
+	t.framer.writer.Flush()
+
+	if t.stats != nil {
+		outTrailer := &stats.OutTrailer{
+			WireLength: bufLen,
+		}
+		t.stats.HandleRPC(s.Context(), outTrailer)
+	}
+	t.closeStream(s)
 	t.writableChan <- 0
 	return nil
 }
@@ -817,6 +986,124 @@ func (t *http2Server) WriteStatus(s *Stream, st *status.Status) error {
 	t.closeStream(s)
 	t.writableChan <- 0
 	return nil
+}
+
+// WriteOptimized converts the data into HTTP2 data frame and sends it out.
+// Non-nil error is returns if it fails (e.g., framing error, transport error).
+// Will do so with minimal flushes.
+func (t *http2Server) WriteOptimized(s *Stream, data []byte, opts *Options) (err error) {
+	// TODO(zhaoq): Support multi-writers for a single stream.
+	var writeHeaderFrame bool
+	s.mu.Lock()
+	if s.state == streamDone {
+		s.mu.Unlock()
+		return streamErrorf(codes.Unknown, "the stream has been done")
+	}
+	if !s.headerOk {
+		writeHeaderFrame = true
+	}
+	s.mu.Unlock()
+	if writeHeaderFrame {
+		t.WriteHeaderOptimized(s, nil)
+	}
+	r := bytes.NewBuffer(data)
+	var (
+		p   []byte
+		oqv uint32
+	)
+	for {
+		if r.Len() == 0 && p == nil {
+			return nil
+		}
+		oqv = atomic.LoadUint32(&t.outQuotaVersion)
+		size := http2MaxFrameLen
+		// Wait until the stream has some quota to send the data.
+		sq, err := wait(s.ctx, nil, nil, t.shutdownChan, s.sendQuotaPool.acquire())
+		if err != nil {
+			return err
+		}
+		// Wait until the transport has some quota to send the data.
+		tq, err := wait(s.ctx, nil, nil, t.shutdownChan, t.sendQuotaPool.acquire())
+		if err != nil {
+			return err
+		}
+		if sq < size {
+			size = sq
+		}
+		if tq < size {
+			size = tq
+		}
+		if p == nil {
+			p = r.Next(size)
+		}
+		ps := len(p)
+		if ps < sq {
+			// Overbooked stream quota. Return it back.
+			s.sendQuotaPool.add(sq - ps)
+		}
+		if ps < tq {
+			// Overbooked transport quota. Return it back.
+			t.sendQuotaPool.add(tq - ps)
+		}
+		t.framer.adjustNumWriters(1)
+		// Got some quota. Try to acquire writing privilege on the
+		// transport.
+		if _, err := wait(s.ctx, nil, nil, t.shutdownChan, t.writableChan); err != nil {
+			if _, ok := err.(StreamError); ok {
+				// Return the connection quota back.
+				t.sendQuotaPool.add(ps)
+			}
+			if t.framer.adjustNumWriters(-1) == 0 {
+				// This writer is the last one in this batch and has the
+				// responsibility to flush the buffered frames. It queues
+				// a flush request to controlBuf instead of flushing directly
+				// in order to avoid the race with other writing or flushing.
+				t.controlBuf.put(&flushIO{})
+			}
+			return err
+		}
+		select {
+		case <-s.ctx.Done():
+			t.sendQuotaPool.add(ps)
+			if t.framer.adjustNumWriters(-1) == 0 {
+				t.controlBuf.put(&flushIO{})
+			}
+			t.writableChan <- 0
+			return ContextErr(s.ctx.Err())
+		default:
+		}
+		if oqv != atomic.LoadUint32(&t.outQuotaVersion) {
+			// InitialWindowSize settings frame must have been received after we
+			// acquired send quota but before we got the writable channel.
+			// We must forsake this write.
+			t.sendQuotaPool.add(ps)
+			s.sendQuotaPool.add(ps)
+			if t.framer.adjustNumWriters(-1) == 0 {
+				t.controlBuf.put(&flushIO{})
+			}
+			t.writableChan <- 0
+			continue
+		}
+		var forceFlush bool
+		if r.Len() == 0 && t.framer.adjustNumWriters(0) == 1 && !opts.Last {
+			// Do a force flush iff this is last frame for the entire gRPC
+			// message and the caller is the only writer at this moment.
+			forceFlush = true
+		}
+		// We will not flush here. WriteStatus gets called eventually, only
+		// then will we do so.
+		forceFlush = false
+		// Reset ping strikes when sending data since this might cause
+		// the peer to send ping.
+		atomic.StoreUint32(&t.resetPingStrikes, 1)
+		if err := t.framer.writeData(forceFlush, s.id, false, p); err != nil {
+			t.Close()
+			return connectionErrorf(true, err, "transport: %v", err)
+		}
+		p = nil
+		t.framer.adjustNumWriters(-1)
+		t.writableChan <- 0
+	}
 }
 
 // Write converts the data into HTTP2 data frame and sends it out. Non-nil error
@@ -916,6 +1203,8 @@ func (t *http2Server) Write(s *Stream, data []byte, opts *Options) (err error) {
 		}
 		var forceFlush bool
 		if r.Len() == 0 && t.framer.adjustNumWriters(0) == 1 && !opts.Last {
+			// Do a force flush iff this is last frame for the entire gRPC
+			// message and the caller is the only writer at this moment.
 			forceFlush = true
 		}
 		// Reset ping strikes when sending data since this might cause
@@ -926,9 +1215,7 @@ func (t *http2Server) Write(s *Stream, data []byte, opts *Options) (err error) {
 			return connectionErrorf(true, err, "transport: %v", err)
 		}
 		p = nil
-		if t.framer.adjustNumWriters(-1) == 0 {
-			t.framer.flushWrite()
-		}
+		t.framer.adjustNumWriters(-1)
 		t.writableChan <- 0
 	}
 

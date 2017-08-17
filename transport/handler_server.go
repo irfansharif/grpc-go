@@ -177,6 +177,10 @@ func (ht *serverHandlerTransport) do(fn func()) error {
 	}
 }
 
+func (ht *serverHandlerTransport) WriteStatusOptimized(s *Stream, st *status.Status) error {
+	return ht.WriteStatus(s, st)
+}
+
 func (ht *serverHandlerTransport) WriteStatus(s *Stream, st *status.Status) error {
 	ht.mu.Lock()
 	if ht.streamDone {
@@ -255,6 +259,10 @@ func (ht *serverHandlerTransport) writeCommonHeaders(s *Stream) {
 	}
 }
 
+func (ht *serverHandlerTransport) WriteOptimized(s *Stream, data []byte, opts *Options) error {
+	return ht.Write(s, data, opts)
+}
+
 func (ht *serverHandlerTransport) Write(s *Stream, data []byte, opts *Options) error {
 	return ht.do(func() {
 		ht.writeCommonHeaders(s)
@@ -263,6 +271,10 @@ func (ht *serverHandlerTransport) Write(s *Stream, data []byte, opts *Options) e
 			ht.rw.(http.Flusher).Flush()
 		}
 	})
+}
+
+func (ht *serverHandlerTransport) WriteHeaderOptimized(s *Stream, md metadata.MD) error {
+	return ht.WriteHeader(s, md)
 }
 
 func (ht *serverHandlerTransport) WriteHeader(s *Stream, md metadata.MD) error {

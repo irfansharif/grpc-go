@@ -604,13 +604,26 @@ type ServerTransport interface {
 	// WriteHeader may not be called on all streams.
 	WriteHeader(s *Stream, md metadata.MD) error
 
+	// WriteHeaderOptimized sends the Header metadata for the given stream.
+	// WriteHeaderOptimized may not be called on all streams.
+	WriteHeaderOptimized(s *Stream, md metadata.MD) error
+
 	// Write sends the data for the given stream.
 	// Write may not be called on all streams.
 	Write(s *Stream, data []byte, opts *Options) error
 
-	// WriteStatus sends the status of a stream to the client.  WriteStatus is
+	// WriteOptimized sends the data for the given stream.
+	// WriteOptimized may not be called on all streams.
+	WriteOptimized(s *Stream, data []byte, opts *Options) error
+
+	// WriteStatus sends the status of a stream to the client. WriteStatus is
 	// the final call made on a stream and always occurs.
 	WriteStatus(s *Stream, st *status.Status) error
+
+	// WriteStatusOptimized sends the status of a stream to the client.
+	// WriteStatusOptimized is the final call made on a stream and always
+	// occurs.
+	WriteStatusOptimized(s *Stream, st *status.Status) error
 
 	// Close tears down the transport. Once it is called, the transport
 	// should not be accessed any more. All the pending streams and their
