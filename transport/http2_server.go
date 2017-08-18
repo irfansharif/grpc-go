@@ -1192,3 +1192,31 @@ func getJitter(v time.Duration) time.Duration {
 	j := rgen.Int63n(2*r) - r
 	return time.Duration(j)
 }
+
+func mergeWithDefaultsKeepaliveParams(kp keepalive.ServerParameters) keepalive.ServerParameters {
+	if kp.MaxConnectionIdle == 0 {
+		kp.MaxConnectionIdle = defaultMaxConnectionIdle
+	}
+	if kp.MaxConnectionAge == 0 {
+		kp.MaxConnectionAge = defaultMaxConnectionAge
+	}
+	// Add a jitter to MaxConnectionAge.
+	kp.MaxConnectionAge += getJitter(kp.MaxConnectionAge)
+	if kp.MaxConnectionAgeGrace == 0 {
+		kp.MaxConnectionAgeGrace = defaultMaxConnectionAgeGrace
+	}
+	if kp.Time == 0 {
+		kp.Time = defaultServerKeepaliveTime
+	}
+	if kp.Timeout == 0 {
+		kp.Timeout = defaultServerKeepaliveTimeout
+	}
+	return kp
+}
+
+func mergeWithDefaultsKeepalivePolicy(kep keepalive.EnforcementPolicy) keepalive.EnforcementPolicy {
+	if kep.MinTime == 0 {
+		kep.MinTime = defaultKeepalivePolicyMinTime
+	}
+	return kep
+}

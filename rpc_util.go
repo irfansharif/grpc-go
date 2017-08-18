@@ -358,6 +358,41 @@ func checkRecvPayload(pf payloadFormat, recvCompress string, dc Decompressor) er
 	return nil
 }
 
+func recvOptimized(p *parser, c Codec, s *transport.StreamOptimized, dc Decompressor, m interface{}, maxReceiveMessageSize int, inPayload *stats.InPayload) error {
+	pf, d, err := p.recvMsg(maxReceiveMessageSize)
+	if err != nil {
+		return err
+	}
+	if inPayload != nil {
+		inPayload.WireLength = len(d)
+	}
+	if err := checkRecvPayload(pf, s.RecvCompressionAlgorithm(), dc); err != nil {
+		return err
+	}
+	if pf == compressionMade {
+		d, err = dc.Do(bytes.NewReader(d))
+		if err != nil {
+			return Errorf(codes.Internal, "grpc: failed to decompress the received message %v", err)
+		}
+	}
+	if len(d) > maxReceiveMessageSize {
+		// TODO: Revisit the error code. Currently keep it consistent with java
+		// implementation.
+		return Errorf(codes.ResourceExhausted, "grpc: received message larger than max (%d vs. %d)", len(d), maxReceiveMessageSize)
+	}
+	if err := c.Unmarshal(d, m); err != nil {
+		return Errorf(codes.Internal, "grpc: failed to unmarshal the received message %v", err)
+	}
+	if inPayload != nil {
+		inPayload.RecvTime = time.Now()
+		inPayload.Payload = m
+		// TODO truncate large payload.
+		inPayload.Data = d
+		inPayload.Length = len(d)
+	}
+	return nil
+}
+
 func recv(p *parser, c Codec, s *transport.Stream, dc Decompressor, m interface{}, maxReceiveMessageSize int, inPayload *stats.InPayload) error {
 	pf, d, err := p.recvMsg(maxReceiveMessageSize)
 	if err != nil {
