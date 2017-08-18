@@ -23,9 +23,8 @@ The type MD is actually a map from string to a list of strings:
 type MD map[string][]string
 ```
 
-Metadata can be read like a normal map.
-Note that the value type of this map is `[]string`,
-so that users can attach multiple values using a single key.
+Metadata can be read like a normal map.  Note that the value type of this map
+is `[]string`, so that users can attach multiple values using a single key.
 
 ### Creating a new metadata
 
@@ -35,8 +34,8 @@ A metadata can be created from a `map[string]string` using function `New`:
 md := metadata.New(map[string]string{"key1": "val1", "key2": "val2"})
 ```
 
-Another way is to use `Pairs`.
-Values with the same key will be merged into a list:
+Another way is to use `Pairs`.  Values with the same key will be merged into a
+list:
 
 ```go
 md := metadata.Pairs(
@@ -46,21 +45,23 @@ md := metadata.Pairs(
 )
 ```
 
-__Note:__ all the keys will be automatically converted to lowercase,
-so "key1" and "kEy1" will be the same key and their values will be merged into the same list.
-This happens for both `New` and `Pairs`.
+__Note:__ all the keys will be automatically converted to lowercase, so "key1"
+and "kEy1" will be the same key and their values will be merged into the same
+list.  This happens for both `New` and `Pairs`.
 
 ### Storing binary data in metadata
 
 In metadata, keys are always strings. But values can be strings or binary data.
 To store binary data value in metadata, simply add "-bin" suffix to the key.
-The values with "-bin" suffixed keys will be encoded when creating the metadata:
+The values with "-bin" suffixed keys will be encoded when creating the
+metadata:
 
 ```go
 md := metadata.Pairs(
     "key", "string value",
-    "key-bin", string([]byte{96, 102}), // this binary data will be encoded (base64) before sending
-                                        // and will be decoded after being transferred.
+    // this binary data will be encoded (base64) before sending
+    // and will be decoded after being transferred.
+    "key-bin", string([]byte{96, 102}), 
 )
 ```
 
@@ -82,7 +83,8 @@ func (s *server) SomeRPC(ctx context.Context, in *pb.SomeRequest) (*pb.SomeRespo
 
 ### Sending metadata
 
-To send metadata to server, the client can wrap the metadata into a context using `NewOutgoingContext`, and make the RPC with this context:
+To send metadata to server, the client can wrap the metadata into a context
+using `NewOutgoingContext`, and make the RPC with this context:
 
 ```go
 md := metadata.Pairs("key", "val")
@@ -97,7 +99,8 @@ response, err := client.SomeRPC(ctx, someRequest)
 stream, err := client.SomeStreamingRPC(ctx)
 ```
 
-To read this back from the context on the client (e.g. in an interceptor) before the RPC is sent, use `FromOutgoingContext`.
+To read this back from the context on the client (e.g. in an interceptor)
+before the RPC is sent, use `FromOutgoingContext`.
 
 ### Receiving metadata
 
@@ -105,7 +108,10 @@ Metadata that a client can receive includes header and trailer.
 
 #### Unary call
 
-Header and trailer sent along with a unary call can be retrieved using function [Header](https://godoc.org/google.golang.org/grpc#Header) and [Trailer](https://godoc.org/google.golang.org/grpc#Trailer) in [CallOption](https://godoc.org/google.golang.org/grpc#CallOption):
+Header and trailer sent along with a unary call can be retrieved using function
+[Header](https://godoc.org/google.golang.org/grpc#Header) and
+[Trailer](https://godoc.org/google.golang.org/grpc#Trailer) in
+[CallOption](https://godoc.org/google.golang.org/grpc#CallOption):
 
 ```go
 var header, trailer metadata.MD // variable to store header and trailer
@@ -127,7 +133,9 @@ For streaming calls including:
 - Client streaming RPC
 - Bidirectional streaming RPC
 
-Header and trailer can be retrieved from the returned stream using function `Header` and `Trailer` in interface [ClientStream](https://godoc.org/google.golang.org/grpc#ClientStream):
+Header and trailer can be retrieved from the returned stream using function
+`Header` and `Trailer` in interface
+[ClientStream](https://godoc.org/google.golang.org/grpc#ClientStream):
 
 ```go
 stream, err := client.SomeStreamingRPC(ctx)
@@ -173,9 +181,12 @@ func (s *server) SomeStreamingRPC(stream pb.Service_SomeStreamingRPCServer) erro
 
 #### Unary call
 
-To send header and trailer to client in unary call, the server can call [SendHeader](https://godoc.org/google.golang.org/grpc#SendHeader) and [SetTrailer](https://godoc.org/google.golang.org/grpc#SetTrailer) functions in module [grpc](https://godoc.org/google.golang.org/grpc).
-These two functions take a context as the first parameter.
-It should be the RPC handler's context or one derived from it:
+To send header and trailer to client in unary call, the server can call
+[SendHeader](https://godoc.org/google.golang.org/grpc#SendHeader) and
+[SetTrailer](https://godoc.org/google.golang.org/grpc#SetTrailer) functions in
+module [grpc](https://godoc.org/google.golang.org/grpc).  These two functions
+take a context as the first parameter.  It should be the RPC handler's context
+or one derived from it:
 
 ```go
 func (s *server) SomeRPC(ctx context.Context, in *pb.someRequest) (*pb.someResponse, error) {
@@ -190,7 +201,9 @@ func (s *server) SomeRPC(ctx context.Context, in *pb.someRequest) (*pb.someRespo
 
 #### Streaming call
 
-For streaming calls, header and trailer can be sent using function `SendHeader` and `SetTrailer` in interface [ServerStream](https://godoc.org/google.golang.org/grpc#ServerStream):
+For streaming calls, header and trailer can be sent using function `SendHeader`
+and `SetTrailer` in interface
+[ServerStream](https://godoc.org/google.golang.org/grpc#ServerStream):
 
 ```go
 func (s *server) SomeStreamingRPC(stream pb.Service_SomeStreamingRPCServer) error {

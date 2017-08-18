@@ -8,9 +8,13 @@ RPCs.
 
 ## Enable Server Reflection
 
-gRPC-go Server Reflection is implemented in package [reflection](https://github.com/grpc/grpc-go/tree/master/reflection). To enable server reflection, you need to import this package and register reflection service on your gRPC server.
+gRPC-go Server Reflection is implemented in package
+[reflection](https://github.com/grpc/grpc-go/tree/master/reflection). To enable
+server reflection, you need to import this package and register reflection
+service on your gRPC server.
 
-For example, to enable server reflection in `example/helloworld`, we need to make the following changes:
+For example, to enable server reflection in `example/helloworld`, we need to
+make the following changes:
 
 ```diff
 --- a/examples/helloworld/greeter_server/main.go
@@ -34,12 +38,16 @@ For example, to enable server reflection in `example/helloworld`, we need to mak
         }
 ```
 
-We have made this change in `example/helloworld`, and we will use it as an example to show the use of gRPC server reflection and gRPC CLI in this tutorial.
+We have made this change in `example/helloworld`, and we will use it as an
+example to show the use of gRPC server reflection and gRPC CLI in this
+tutorial.
 
 ## gRPC CLI
 
-After enabling Server Reflection in a server application, you can use gRPC CLI to check its services.
-gRPC CLI is only available in c++. Instructions on how to use gRPC CLI can be found at [command_line_tool.md](https://github.com/grpc/grpc/blob/master/doc/command_line_tool.md).
+After enabling Server Reflection in a server application, you can use gRPC CLI
+to check its services.  gRPC CLI is only available in c++. Instructions on how
+to use gRPC CLI can be found at
+[command_line_tool.md](https://github.com/grpc/grpc/blob/master/doc/command_line_tool.md).
 
 To build gRPC CLI:
 
