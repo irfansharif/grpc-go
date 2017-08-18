@@ -84,18 +84,22 @@ type service struct {
 type Server struct {
 	opts options
 
-	mu     sync.Mutex // guards following
-	lis    map[net.Listener]bool
-	conns  map[io.Closer]bool
-	serve  bool
-	drain  bool
-	ctx    context.Context
-	cancel context.CancelFunc
-	// A CondVar to let GracefulStop() blocks until all the pending RPCs are finished
-	// and all the transport goes away.
-	cv     *sync.Cond
-	m      map[string]*service // service name -> service info
-	events trace.EventLog
+	mu struct {
+		sync.Mutex
+		lis    map[net.Listener]bool
+		conns  map[io.Closer]bool
+		serve  bool
+		drain  bool
+		ctx    context.Context
+		cancel context.CancelFunc
+		// A CondVar to let GracefulStop() blocks until all the pending RPCs are finished
+		// and all the transport goes away.
+		cv *sync.Cond
+		// FIXME(irfansharif): Doesn't look like this is always protected by the mu.
+		m map[string]*service // service name -> service info
+		// FIXME(irfansharif): Doesn't look like this is always protected by the mu.
+		events trace.EventLog
+	}
 }
 
 type options struct {
@@ -285,16 +289,16 @@ func NewServer(opt ...ServerOption) *Server {
 		opts.codec = protoCodec{}
 	}
 	s := &Server{
-		lis:   make(map[net.Listener]bool),
-		opts:  opts,
-		conns: make(map[io.Closer]bool),
-		m:     make(map[string]*service),
+		opts: opts,
 	}
-	s.cv = sync.NewCond(&s.mu)
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.mu.lis = make(map[net.Listener]bool)
+	s.mu.conns = make(map[io.Closer]bool)
+	s.mu.cv = sync.NewCond(&s.mu)
+	s.mu.ctx, s.mu.cancel = context.WithCancel(context.Background())
+	s.mu.m = make(map[string]*service)
 	if EnableTracing {
 		_, file, line, _ := runtime.Caller(1)
-		s.events = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
+		s.mu.events = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
 	}
 	return s
 }
@@ -302,16 +306,16 @@ func NewServer(opt ...ServerOption) *Server {
 // printf records an event in s's event log, unless s has been stopped.
 // REQUIRES s.mu is held.
 func (s *Server) printf(format string, a ...interface{}) {
-	if s.events != nil {
-		s.events.Printf(format, a...)
+	if s.mu.events != nil {
+		s.mu.events.Printf(format, a...)
 	}
 }
 
 // errorf records an error in s's event log, unless s has been stopped.
 // REQUIRES s.mu is held.
 func (s *Server) errorf(format string, a ...interface{}) {
-	if s.events != nil {
-		s.events.Errorf(format, a...)
+	if s.mu.events != nil {
+		s.mu.events.Errorf(format, a...)
 	}
 }
 
@@ -331,10 +335,10 @@ func (s *Server) register(sd *ServiceDesc, ss interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.printf("RegisterService(%q)", sd.ServiceName)
-	if s.serve {
+	if s.mu.serve {
 		grpclog.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
 	}
-	if _, ok := s.m[sd.ServiceName]; ok {
+	if _, ok := s.mu.m[sd.ServiceName]; ok {
 		grpclog.Fatalf("grpc: Server.RegisterService found duplicate service registration for %q", sd.ServiceName)
 	}
 	srv := &service{
@@ -351,7 +355,7 @@ func (s *Server) register(sd *ServiceDesc, ss interface{}) {
 		d := &sd.Streams[i]
 		srv.sd[d.StreamName] = d
 	}
-	s.m[sd.ServiceName] = srv
+	s.mu.m[sd.ServiceName] = srv
 }
 
 // MethodInfo contains the information of an RPC including its method name and type.
@@ -375,7 +379,7 @@ type ServiceInfo struct {
 // Service names include the package names, in the form of <package>.<service>.
 func (s *Server) GetServiceInfo() map[string]ServiceInfo {
 	ret := make(map[string]ServiceInfo)
-	for n, srv := range s.m {
+	for n, srv := range s.mu.m {
 		methods := make([]MethodInfo, 0, len(srv.md)+len(srv.sd))
 		for m := range srv.md {
 			methods = append(methods, MethodInfo{
@@ -422,19 +426,19 @@ func (s *Server) useTransportAuthenticator(rawConn net.Conn) (net.Conn, credenti
 func (s *Server) Serve(lis net.Listener) error {
 	s.mu.Lock()
 	s.printf("serving")
-	s.serve = true
-	if s.lis == nil {
+	s.mu.serve = true
+	if s.mu.lis == nil {
 		s.mu.Unlock()
 		lis.Close()
 		return ErrServerStopped
 	}
-	s.lis[lis] = true
+	s.mu.lis[lis] = true
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		if s.lis != nil && s.lis[lis] {
+		if s.mu.lis != nil && s.mu.lis[lis] {
 			lis.Close()
-			delete(s.lis, lis)
+			delete(s.mu.lis, lis)
 		}
 		s.mu.Unlock()
 	}()
@@ -461,7 +465,7 @@ func (s *Server) Serve(lis net.Listener) error {
 				timer := time.NewTimer(tempDelay)
 				select {
 				case <-timer.C:
-				case <-s.ctx.Done():
+				case <-s.mu.ctx.Done():
 				}
 				timer.Stop()
 				continue
@@ -496,7 +500,7 @@ func (s *Server) handleRawConnOptimized(rawConn net.Conn) {
 	}
 
 	s.mu.Lock()
-	if s.conns == nil {
+	if s.mu.conns == nil {
 		s.mu.Unlock()
 		conn.Close()
 		return
@@ -527,7 +531,7 @@ func (s *Server) handleRawConn(rawConn net.Conn) {
 	}
 
 	s.mu.Lock()
-	if s.conns == nil {
+	if s.mu.conns == nil {
 		s.mu.Unlock()
 		conn.Close()
 		return
@@ -754,19 +758,19 @@ func (s *Server) traceInfo(st transport.ServerTransport, stream *transport.Strea
 func (s *Server) addConn(c io.Closer) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conns == nil || s.drain {
+	if s.mu.conns == nil || s.mu.drain {
 		return false
 	}
-	s.conns[c] = true
+	s.mu.conns[c] = true
 	return true
 }
 
 func (s *Server) removeConn(c io.Closer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conns != nil {
-		delete(s.conns, c)
-		s.cv.Broadcast()
+	if s.mu.conns != nil {
+		delete(s.mu.conns, c)
+		s.mu.cv.Broadcast()
 	}
 }
 
@@ -1366,7 +1370,7 @@ func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimizedd, st
 	}
 	service := sm[:pos]
 	method := sm[pos+1:]
-	srv, ok := s.m[service]
+	srv, ok := s.mu.m[service]
 	if !ok {
 		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
 			s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, trInfo)
@@ -1445,7 +1449,7 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	}
 	service := sm[:pos]
 	method := sm[pos+1:]
-	srv, ok := s.m[service]
+	srv, ok := s.mu.m[service]
 	if !ok {
 		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
 			s.processStreamingRPC(t, stream, nil, unknownDesc, trInfo)
@@ -1505,12 +1509,12 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 // errors.
 func (s *Server) Stop() {
 	s.mu.Lock()
-	listeners := s.lis
-	s.lis = nil
-	st := s.conns
-	s.conns = nil
+	listeners := s.mu.lis
+	s.mu.lis = nil
+	st := s.mu.conns
+	s.mu.conns = nil
 	// interrupt GracefulStop if Stop and GracefulStop are called concurrently.
-	s.cv.Broadcast()
+	s.mu.cv.Broadcast()
 	s.mu.Unlock()
 
 	for lis := range listeners {
@@ -1521,10 +1525,10 @@ func (s *Server) Stop() {
 	}
 
 	s.mu.Lock()
-	s.cancel()
-	if s.events != nil {
-		s.events.Finish()
-		s.events = nil
+	s.mu.cancel()
+	if s.mu.events != nil {
+		s.mu.events.Finish()
+		s.mu.events = nil
 	}
 	s.mu.Unlock()
 }
@@ -1535,27 +1539,27 @@ func (s *Server) Stop() {
 func (s *Server) GracefulStop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conns == nil {
+	if s.mu.conns == nil {
 		return
 	}
-	for lis := range s.lis {
+	for lis := range s.mu.lis {
 		lis.Close()
 	}
-	s.lis = nil
-	s.cancel()
-	if !s.drain {
-		for c := range s.conns {
+	s.mu.lis = nil
+	s.mu.cancel()
+	if !s.mu.drain {
+		for c := range s.mu.conns {
 			c.(transport.ServerTransport).Drain()
 		}
-		s.drain = true
+		s.mu.drain = true
 	}
-	for len(s.conns) != 0 {
-		s.cv.Wait()
+	for len(s.mu.conns) != 0 {
+		s.mu.cv.Wait()
 	}
-	s.conns = nil
-	if s.events != nil {
-		s.events.Finish()
-		s.events = nil
+	s.mu.conns = nil
+	if s.mu.events != nil {
+		s.mu.events.Finish()
+		s.mu.events = nil
 	}
 }
 
@@ -1572,9 +1576,9 @@ func init() {
 // accepting new connections.
 func (s *Server) testingCloseConns() {
 	s.mu.Lock()
-	for c := range s.conns {
+	for c := range s.mu.conns {
 		c.Close()
-		delete(s.conns, c)
+		delete(s.mu.conns, c)
 	}
 	s.mu.Unlock()
 }
