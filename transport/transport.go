@@ -296,7 +296,7 @@ func NewServerTransport(_ string, conn net.Conn, config *ServerConfig) (ServerTr
 
 // NewServerTransportOptimized creates a ServerTransport with conn or non-nil error
 // if it fails.
-func NewServerTransportOptimized(_ string, conn net.Conn, config *ServerConfig) (ServerTransportOptimizedd, error) {
+func NewServerTransportOptimized(_ string, conn net.Conn, config *ServerConfig) (ServerTransportOptimized, error) {
 	return newHTTP2ServerOptimized(conn, config)
 }
 
@@ -458,12 +458,12 @@ type ServerTransport interface {
 	Drain()
 }
 
-// ServerTransportOptimizedd is the common interface for all gRPC server-side
+// ServerTransportOptimized is the common interface for all gRPC server-side
 // transport implementations.
 //
 // Methods may be called concurrently from multiple goroutines, but
 // Write methods for a given Stream will be called serially.
-type ServerTransportOptimizedd interface {
+type ServerTransportOptimized interface {
 	// HandleStreams receives incoming streams using the given handler.
 	HandleStreams(func(*StreamOptimized), func(context.Context, string) context.Context)
 

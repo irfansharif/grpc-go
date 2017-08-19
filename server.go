@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"reflect"
@@ -39,241 +38,50 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/internal"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/tap"
 	"google.golang.org/grpc/transport"
 )
 
-const (
-	defaultServerMaxReceiveMessageSize = 1024 * 1024 * 4
-	defaultServerMaxSendMessageSize    = math.MaxInt32
-)
-
-type methodHandler func(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor UnaryServerInterceptor) (interface{}, error)
-
-// MethodDesc represents an RPC service's method specification.
-type MethodDesc struct {
-	MethodName string
-	Handler    methodHandler
-}
-
-// ServiceDesc represents an RPC service's specification.
-type ServiceDesc struct {
-	ServiceName string
-	// The pointer to the service interface. Used to check whether the user
-	// provided implementation satisfies the interface requirements.
-	HandlerType interface{}
-	Methods     []MethodDesc
-	Streams     []StreamDesc
-	Metadata    interface{}
-}
-
-// service consists of the information of the server serving this service and
-// the methods in this service.
-type service struct {
-	server interface{} // the server for service methods
-	md     map[string]*MethodDesc
-	sd     map[string]*StreamDesc
-	mdata  interface{}
-}
-
 // Server is a gRPC server to serve RPC requests.
+//
+// FIXME(irfansharif): Document each member more thoroughly.
+// FIXME(irfansharif): Think about how {Graceful,}Stop interoperate using
+// sync.Cond and nil maps.
 type Server struct {
 	opts options
 
+	// Locking notes: To avoid deadlocks the following lock order must be
+	// obeyed: Server.mu < Server.eventsMu.
+	//
+	// (It is not required to acquire every lock in sequence, but when multiple
+	// locks are held at the same time, it is incorrect to acquire a lock with
+	// a "lesser" value in the sequence after one with "greater" value.)
+
 	mu struct {
 		sync.Mutex
-		lis    map[net.Listener]bool
-		conns  map[io.Closer]bool
-		serve  bool
-		drain  bool
-		ctx    context.Context
-		cancel context.CancelFunc
+		listeners map[net.Listener]struct{}
+		conns     map[io.Closer]struct{}
+		serving   bool
+		drain     bool
 		// A CondVar to let GracefulStop() blocks until all the pending RPCs are finished
 		// and all the transport goes away.
 		cv *sync.Cond
 		// FIXME(irfansharif): Doesn't look like this is always protected by the mu.
-		m map[string]*service // service name -> service info
-		// FIXME(irfansharif): Doesn't look like this is always protected by the mu.
 		events trace.EventLog
+
+		// This should be used instead of checking if Server.mu.conns == nil or
+		// Server.mu.listeners == nil.
+		stopCh chan struct{}
 	}
-}
 
-type options struct {
-	creds                 credentials.TransportCredentials
-	codec                 Codec
-	cp                    Compressor
-	dc                    Decompressor
-	unaryInt              UnaryServerInterceptor
-	streamInt             StreamServerInterceptor
-	inTapHandle           tap.ServerInHandle
-	statsHandler          stats.Handler
-	maxConcurrentStreams  uint32
-	maxReceiveMessageSize int
-	maxSendMessageSize    int
-	useHandlerImpl        bool // use http.Handler-based server
-	unknownStreamDesc     *StreamDesc
-	keepaliveParams       keepalive.ServerParameters
-	keepalivePolicy       keepalive.EnforcementPolicy
-	initialWindowSize     int32
-	initialConnWindowSize int32
-}
-
-var defaultServerOptions = options{
-	maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
-	maxSendMessageSize:    defaultServerMaxSendMessageSize,
-}
-
-// A ServerOption sets options such as credentials, codec and keepalive parameters, etc.
-type ServerOption func(*options)
-
-// InitialWindowSize returns a ServerOption that sets window size for stream.
-// The lower bound for window size is 64K and any value smaller than that will be ignored.
-func InitialWindowSize(s int32) ServerOption {
-	return func(o *options) {
-		o.initialWindowSize = s
-	}
-}
-
-// InitialConnWindowSize returns a ServerOption that sets window size for a connection.
-// The lower bound for window size is 64K and any value smaller than that will be ignored.
-func InitialConnWindowSize(s int32) ServerOption {
-	return func(o *options) {
-		o.initialConnWindowSize = s
-	}
-}
-
-// KeepaliveParams returns a ServerOption that sets keepalive and max-age parameters for the server.
-func KeepaliveParams(kp keepalive.ServerParameters) ServerOption {
-	return func(o *options) {
-		o.keepaliveParams = kp
-	}
-}
-
-// KeepaliveEnforcementPolicy returns a ServerOption that sets keepalive enforcement policy for the server.
-func KeepaliveEnforcementPolicy(kep keepalive.EnforcementPolicy) ServerOption {
-	return func(o *options) {
-		o.keepalivePolicy = kep
-	}
-}
-
-// CustomCodec returns a ServerOption that sets a codec for message marshaling and unmarshaling.
-func CustomCodec(codec Codec) ServerOption {
-	return func(o *options) {
-		o.codec = codec
-	}
-}
-
-// RPCCompressor returns a ServerOption that sets a compressor for outbound messages.
-func RPCCompressor(cp Compressor) ServerOption {
-	return func(o *options) {
-		o.cp = cp
-	}
-}
-
-// RPCDecompressor returns a ServerOption that sets a decompressor for inbound messages.
-func RPCDecompressor(dc Decompressor) ServerOption {
-	return func(o *options) {
-		o.dc = dc
-	}
-}
-
-// MaxMsgSize returns a ServerOption to set the max message size in bytes the server can receive.
-// If this is not set, gRPC uses the default limit. Deprecated: use MaxRecvMsgSize instead.
-func MaxMsgSize(m int) ServerOption {
-	return MaxRecvMsgSize(m)
-}
-
-// MaxRecvMsgSize returns a ServerOption to set the max message size in bytes the server can receive.
-// If this is not set, gRPC uses the default 4MB.
-func MaxRecvMsgSize(m int) ServerOption {
-	return func(o *options) {
-		o.maxReceiveMessageSize = m
-	}
-}
-
-// MaxSendMsgSize returns a ServerOption to set the max message size in bytes the server can send.
-// If this is not set, gRPC uses the default 4MB.
-func MaxSendMsgSize(m int) ServerOption {
-	return func(o *options) {
-		o.maxSendMessageSize = m
-	}
-}
-
-// MaxConcurrentStreams returns a ServerOption that will apply a limit on the number
-// of concurrent streams to each ServerTransport.
-func MaxConcurrentStreams(n uint32) ServerOption {
-	return func(o *options) {
-		o.maxConcurrentStreams = n
-	}
-}
-
-// Creds returns a ServerOption that sets credentials for server connections.
-func Creds(c credentials.TransportCredentials) ServerOption {
-	return func(o *options) {
-		o.creds = c
-	}
-}
-
-// UnaryInterceptor returns a ServerOption that sets the UnaryServerInterceptor for the
-// server. Only one unary interceptor can be installed. The construction of multiple
-// interceptors (e.g., chaining) can be implemented at the caller.
-func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
-	return func(o *options) {
-		if o.unaryInt != nil {
-			panic("The unary server interceptor was already set and may not be reset.")
-		}
-		o.unaryInt = i
-	}
-}
-
-// StreamInterceptor returns a ServerOption that sets the StreamServerInterceptor for the
-// server. Only one stream interceptor can be installed.
-func StreamInterceptor(i StreamServerInterceptor) ServerOption {
-	return func(o *options) {
-		if o.streamInt != nil {
-			panic("The stream server interceptor was already set and may not be reset.")
-		}
-		o.streamInt = i
-	}
-}
-
-// InTapHandle returns a ServerOption that sets the tap handle for all the server
-// transport to be created. Only one can be installed.
-func InTapHandle(h tap.ServerInHandle) ServerOption {
-	return func(o *options) {
-		if o.inTapHandle != nil {
-			panic("The tap handle was already set and may not be reset.")
-		}
-		o.inTapHandle = h
-	}
-}
-
-// StatsHandler returns a ServerOption that sets the stats handler for the server.
-func StatsHandler(h stats.Handler) ServerOption {
-	return func(o *options) {
-		o.statsHandler = h
-	}
-}
-
-// UnknownServiceHandler returns a ServerOption that allows for adding a custom
-// unknown service handler. The provided method is a bidi-streaming RPC service
-// handler that will be invoked instead of returning the "unimplemented" gRPC
-// error whenever a request is received for an unregistered service or method.
-// The handling function has full access to the Context of the request and the
-// stream, and the invocation passes through interceptors.
-func UnknownServiceHandler(streamHandler StreamHandler) ServerOption {
-	return func(o *options) {
-		o.unknownStreamDesc = &StreamDesc{
-			StreamName: "unknown_service_handler",
-			Handler:    streamHandler,
-			// We need to assume that the users of the streamHandler will want to use both.
-			ClientStreams: true,
-			ServerStreams: true,
-		}
+	// FIXME(irfansharif): Talk about lifetime, initialized/written to only
+	// during registration/pre-Server.Start.
+	services map[string]*service // service name -> service info
+	eventsMu struct {
+		sync.Mutex
+		log trace.EventLog
 	}
 }
 
@@ -289,34 +97,19 @@ func NewServer(opt ...ServerOption) *Server {
 		opts.codec = protoCodec{}
 	}
 	s := &Server{
-		opts: opts,
+		opts:     opts,
+		services: make(map[string]*service),
 	}
-	s.mu.lis = make(map[net.Listener]bool)
-	s.mu.conns = make(map[io.Closer]bool)
+	s.mu.listeners = make(map[net.Listener]struct{})
+	s.mu.conns = make(map[io.Closer]struct{})
 	s.mu.cv = sync.NewCond(&s.mu)
-	s.mu.ctx, s.mu.cancel = context.WithCancel(context.Background())
-	s.mu.m = make(map[string]*service)
+	s.mu.stopCh = make(chan struct{})
+
 	if EnableTracing {
 		_, file, line, _ := runtime.Caller(1)
-		s.mu.events = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
+		s.eventsMu.log = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
 	}
 	return s
-}
-
-// printf records an event in s's event log, unless s has been stopped.
-// REQUIRES s.mu is held.
-func (s *Server) printf(format string, a ...interface{}) {
-	if s.mu.events != nil {
-		s.mu.events.Printf(format, a...)
-	}
-}
-
-// errorf records an error in s's event log, unless s has been stopped.
-// REQUIRES s.mu is held.
-func (s *Server) errorf(format string, a ...interface{}) {
-	if s.mu.events != nil {
-		s.mu.events.Errorf(format, a...)
-	}
 }
 
 // RegisterService registers a service and its implementation to the gRPC
@@ -331,186 +124,111 @@ func (s *Server) RegisterService(sd *ServiceDesc, ss interface{}) {
 	s.register(sd, ss)
 }
 
-func (s *Server) register(sd *ServiceDesc, ss interface{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.printf("RegisterService(%q)", sd.ServiceName)
-	if s.mu.serve {
-		grpclog.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
-	}
-	if _, ok := s.mu.m[sd.ServiceName]; ok {
-		grpclog.Fatalf("grpc: Server.RegisterService found duplicate service registration for %q", sd.ServiceName)
-	}
-	srv := &service{
-		server: ss,
-		md:     make(map[string]*MethodDesc),
-		sd:     make(map[string]*StreamDesc),
-		mdata:  sd.Metadata,
-	}
-	for i := range sd.Methods {
-		d := &sd.Methods[i]
-		srv.md[d.MethodName] = d
-	}
-	for i := range sd.Streams {
-		d := &sd.Streams[i]
-		srv.sd[d.StreamName] = d
-	}
-	s.mu.m[sd.ServiceName] = srv
-}
-
-// MethodInfo contains the information of an RPC including its method name and type.
-type MethodInfo struct {
-	// Name is the method name only, without the service name or package name.
-	Name string
-	// IsClientStream indicates whether the RPC is a client streaming RPC.
-	IsClientStream bool
-	// IsServerStream indicates whether the RPC is a server streaming RPC.
-	IsServerStream bool
-}
-
-// ServiceInfo contains unary RPC method info, streaming RPC method info and metadata for a service.
-type ServiceInfo struct {
-	Methods []MethodInfo
-	// Metadata is the metadata specified in ServiceDesc when registering service.
-	Metadata interface{}
-}
-
-// GetServiceInfo returns a map from service names to ServiceInfo.
-// Service names include the package names, in the form of <package>.<service>.
-func (s *Server) GetServiceInfo() map[string]ServiceInfo {
-	ret := make(map[string]ServiceInfo)
-	for n, srv := range s.mu.m {
-		methods := make([]MethodInfo, 0, len(srv.md)+len(srv.sd))
-		for m := range srv.md {
-			methods = append(methods, MethodInfo{
-				Name:           m,
-				IsClientStream: false,
-				IsServerStream: false,
-			})
-		}
-		for m, d := range srv.sd {
-			methods = append(methods, MethodInfo{
-				Name:           m,
-				IsClientStream: d.ClientStreams,
-				IsServerStream: d.ServerStreams,
-			})
-		}
-
-		ret[n] = ServiceInfo{
-			Methods:  methods,
-			Metadata: srv.mdata,
-		}
-	}
-	return ret
-}
-
 var (
 	// ErrServerStopped indicates that the operation is now illegal because of
 	// the server being stopped.
 	ErrServerStopped = errors.New("grpc: the server has been stopped")
 )
 
-func (s *Server) useTransportAuthenticator(rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
-	if s.opts.creds == nil {
-		return rawConn, nil, nil
-	}
-	return s.opts.creds.ServerHandshake(rawConn)
-}
-
 // Serve accepts incoming connections on the listener lis, creating a new
 // ServerTransport and service goroutine for each. The service goroutines
 // read gRPC requests and then call the registered handlers to reply to them.
-// Serve returns when lis.Accept fails with fatal errors.  lis will be closed when
+// Serve returns when lis.Accept fails with fatal errors. lis will be closed when
 // this method returns.
+//
 // Serve always returns non-nil error.
 func (s *Server) Serve(lis net.Listener) error {
 	s.mu.Lock()
-	s.printf("serving")
-	s.mu.serve = true
-	if s.mu.lis == nil {
+	s.logEventf("serving")
+	s.mu.serving = true
+
+	if s.mu.stopCh == nil {
+		// We've already been stopped.
 		s.mu.Unlock()
 		lis.Close()
 		return ErrServerStopped
 	}
-	s.mu.lis[lis] = true
+	// FIXME(irfansharif): Comment how we're holding to a reference.
+	stopCh := s.mu.stopCh
+	s.mu.listeners[lis] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		if s.mu.lis != nil && s.mu.lis[lis] {
-			lis.Close()
-			delete(s.mu.lis, lis)
+		defer s.mu.Unlock()
+		if s.mu.stopCh == nil {
+			return
 		}
-		s.mu.Unlock()
+		lis.Close()
+		delete(s.mu.listeners, lis)
 	}()
 
-	var tempDelay time.Duration // how long to sleep on accept failure
+	// For temporary errors we back-off exponentially.
+	const minWaitTime time.Duration = 5 * time.Millisecond
+	const maxWaitTime time.Duration = time.Second
+	waitTime := minWaitTime
+
+	t := time.NewTimer(0)
+	// FIXME(irfansharif): To ensure we don't leak resources. Is this true?
+	defer t.Stop()
+
+	// Drain the timer so we can re-use it below in the tight loop.
+	// FIXME(irfansharif): Explain this pattern.
+	<-t.C
 
 	for {
-		rawConn, err := lis.Accept()
+		conn, err := lis.Accept()
 		if err != nil {
-			if ne, ok := err.(interface {
-				Temporary() bool
-			}); ok && ne.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else {
-					tempDelay *= 2
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				waitTime *= 2
+				if waitTime > maxWaitTime {
+					waitTime = maxWaitTime
 				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
-				}
-				s.mu.Lock()
-				s.printf("Accept error: %v; retrying in %v", err, tempDelay)
-				s.mu.Unlock()
-				timer := time.NewTimer(tempDelay)
+
+				s.logEventf("Accept error: %v; retrying in %v", err, waitTime)
+
+				t.Reset(waitTime)
 				select {
-				case <-timer.C:
-				case <-s.mu.ctx.Done():
+				case <-t.C:
+				case <-stopCh:
 				}
-				timer.Stop()
 				continue
 			}
-			s.mu.Lock()
-			s.printf("done serving; Accept = %v", err)
-			s.mu.Unlock()
+
+			s.logEventf("done serving; Accept = %v", err)
 			return err
 		}
-		tempDelay = 0
-		// Start a new goroutine to deal with rawConn
-		// so we don't stall this Accept loop goroutine.
-		// FIXME(irfansharif): This is the point of divergence from the existing implementation.
-		go s.handleRawConnOptimized(rawConn)
+		// We reset waitTime.
+		waitTime = minWaitTime
+
+		// Start a new goroutine to deal with the accepted net.Conn so we don't
+		// stall this listener.Accept loop goroutine.
+		//
+		// FIXME(irfansharif): This is the point of divergence from the
+		// existing implementation.
+		go s.handleConnOptimized(conn)
 	}
 }
 
-// handleRawConnOptimized is run in its own goroutine and handles a just-accepted
+// handleConnOptimized is run in its own goroutine and handles a just-accepted
 // connection that has not had any I/O performed on it yet.
-func (s *Server) handleRawConnOptimized(rawConn net.Conn) {
-	conn, authInfo, err := s.useTransportAuthenticator(rawConn)
+func (s *Server) handleConnOptimized(conn net.Conn) {
+	authConn, authInfo, err := s.useTransportAuthenticator(conn)
 	if err != nil {
-		s.mu.Lock()
-		s.errorf("ServerHandshake(%q) failed: %v", rawConn.RemoteAddr(), err)
-		s.mu.Unlock()
-		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", rawConn.RemoteAddr(), err)
+		s.logErrorf("ServerHandshake(%q) failed: %v", conn.RemoteAddr(), err)
+		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", conn.RemoteAddr(), err)
 		// If serverHandShake returns ErrConnDispatched, keep rawConn open.
 		if err != credentials.ErrConnDispatched {
-			rawConn.Close()
+			conn.Close()
 		}
 		return
 	}
 
-	s.mu.Lock()
-	if s.mu.conns == nil {
-		s.mu.Unlock()
-		conn.Close()
-		return
-	}
-	s.mu.Unlock()
-
 	if s.opts.useHandlerImpl {
-		s.serveUsingHandler(conn)
+		s.serveUsingHandler(authConn)
 	} else {
-		s.serveHTTP2TransportOptimized(conn, authInfo)
+		// FIXME(irfansharif): Put this thing behind some flag so we can just
+		// fall back to default implementation.
+		s.serveHTTP2TransportOptimized(authConn, authInfo)
 	}
 }
 
@@ -519,9 +237,7 @@ func (s *Server) handleRawConnOptimized(rawConn net.Conn) {
 func (s *Server) handleRawConn(rawConn net.Conn) {
 	conn, authInfo, err := s.useTransportAuthenticator(rawConn)
 	if err != nil {
-		s.mu.Lock()
-		s.errorf("ServerHandshake(%q) failed: %v", rawConn.RemoteAddr(), err)
-		s.mu.Unlock()
+		s.logErrorf("ServerHandshake(%q) failed: %v", rawConn.RemoteAddr(), err)
 		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", rawConn.RemoteAddr(), err)
 		// If serverHandShake returns ErrConnDispatched, keep rawConn open.
 		if err != credentials.ErrConnDispatched {
@@ -530,14 +246,6 @@ func (s *Server) handleRawConn(rawConn net.Conn) {
 		return
 	}
 
-	s.mu.Lock()
-	if s.mu.conns == nil {
-		s.mu.Unlock()
-		conn.Close()
-		return
-	}
-	s.mu.Unlock()
-
 	if s.opts.useHandlerImpl {
 		s.serveUsingHandler(conn)
 	} else {
@@ -545,12 +253,11 @@ func (s *Server) handleRawConn(rawConn net.Conn) {
 	}
 }
 
-// serveHTTP2Transport sets up a http/2 transport (using the
-// gRPC http2 server transport in transport/http2_server.go) and
-// serves streams on it.
+// serveHTTP2Transport sets up a HTTP/2 transport (using the gRPC HTTP2 server
+// transport in transport/http2_server_optimized.go) and serves streams on it.
 // This is run in its own goroutine (it does network I/O in
 // transport.NewServerTransport).
-func (s *Server) serveHTTP2TransportOptimized(c net.Conn, authInfo credentials.AuthInfo) {
+func (s *Server) serveHTTP2TransportOptimized(conn net.Conn, authInfo credentials.AuthInfo) {
 	config := &transport.ServerConfig{
 		MaxStreams:            s.opts.maxConcurrentStreams,
 		AuthInfo:              authInfo,
@@ -561,12 +268,10 @@ func (s *Server) serveHTTP2TransportOptimized(c net.Conn, authInfo credentials.A
 		InitialWindowSize:     s.opts.initialWindowSize,
 		InitialConnWindowSize: s.opts.initialConnWindowSize,
 	}
-	st, err := transport.NewServerTransportOptimized("http2", c, config)
+	st, err := transport.NewServerTransportOptimized("http2", conn, config)
 	if err != nil {
-		s.mu.Lock()
-		s.errorf("NewServerTransport(%q) failed: %v", c.RemoteAddr(), err)
-		s.mu.Unlock()
-		c.Close()
+		s.logErrorf("NewServerTransport(%q) failed: %v", conn.RemoteAddr(), err)
+		conn.Close()
 		grpclog.Warningln("grpc: Server.Serve failed to create ServerTransport: ", err)
 		return
 	}
@@ -595,9 +300,7 @@ func (s *Server) serveHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) 
 	}
 	st, err := transport.NewServerTransport("http2", c, config)
 	if err != nil {
-		s.mu.Lock()
-		s.errorf("NewServerTransport(%q) failed: %v", c.RemoteAddr(), err)
-		s.mu.Unlock()
+		s.logErrorf("NewServerTransport(%q) failed: %v", c.RemoteAddr(), err)
 		c.Close()
 		grpclog.Warningln("grpc: Server.Serve failed to create ServerTransport: ", err)
 		return
@@ -609,7 +312,7 @@ func (s *Server) serveHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) 
 	s.serveStreams(st)
 }
 
-func (s *Server) serveStreamsOptimized(st transport.ServerTransportOptimizedd) {
+func (s *Server) serveStreamsOptimized(st transport.ServerTransportOptimized) {
 	defer s.removeConn(st)
 	defer st.Close()
 	var wg sync.WaitGroup
@@ -717,7 +420,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // traceInfo returns a traceInfo and associates it with stream, if tracing is enabled.
 // If tracing is not enabled, it returns nil.
-func (s *Server) traceInfoOptimized(st transport.ServerTransportOptimizedd, stream *transport.StreamOptimized) (trInfo *traceInfo) {
+func (s *Server) traceInfoOptimized(st transport.ServerTransportOptimized, stream *transport.StreamOptimized) (trInfo *traceInfo) {
 	tr, ok := trace.FromContext(stream.Context())
 	if !ok {
 		return nil
@@ -761,7 +464,7 @@ func (s *Server) addConn(c io.Closer) bool {
 	if s.mu.conns == nil || s.mu.drain {
 		return false
 	}
-	s.mu.conns[c] = true
+	s.mu.conns[c] = struct{}{}
 	return true
 }
 
@@ -774,7 +477,7 @@ func (s *Server) removeConn(c io.Closer) {
 	}
 }
 
-func (s *Server) sendResponseOptimized(t transport.ServerTransportOptimizedd, stream *transport.StreamOptimized, msg interface{}, cp Compressor, opts *transport.Options) error {
+func (s *Server) sendResponseOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, msg interface{}, cp Compressor, opts *transport.Options) error {
 	var (
 		cbuf       *bytes.Buffer
 		outPayload *stats.OutPayload
@@ -828,7 +531,7 @@ func (s *Server) sendResponse(t transport.ServerTransport, stream *transport.Str
 	return err
 }
 
-func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimizedd, stream *transport.StreamOptimized, srv *service, md *MethodDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, srv *service, md *MethodDesc, trInfo *traceInfo) (err error) {
 	sh := s.opts.statsHandler
 	if sh != nil {
 		begin := &stats.Begin{
@@ -1160,7 +863,7 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 	return t.WriteStatus(stream, status.New(codes.OK, ""))
 }
 
-func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimizedd, stream *transport.StreamOptimized, srv *service, sd *StreamDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, srv *service, sd *StreamDesc, trInfo *traceInfo) (err error) {
 	sh := s.opts.statsHandler
 	if sh != nil {
 		begin := &stats.Begin{
@@ -1344,7 +1047,7 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 	return t.WriteStatus(ss.s, status.New(codes.OK, ""))
 }
 
-func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimizedd, stream *transport.StreamOptimized, trInfo *traceInfo) {
+func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, trInfo *traceInfo) {
 	sm := stream.Method()
 	if sm != "" && sm[0] == '/' {
 		sm = sm[1:]
@@ -1370,7 +1073,7 @@ func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimizedd, st
 	}
 	service := sm[:pos]
 	method := sm[pos+1:]
-	srv, ok := s.mu.m[service]
+	srv, ok := s.services[service]
 	if !ok {
 		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
 			s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, trInfo)
@@ -1449,7 +1152,7 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	}
 	service := sm[:pos]
 	method := sm[pos+1:]
-	srv, ok := s.mu.m[service]
+	srv, ok := s.services[service]
 	if !ok {
 		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
 			s.processStreamingRPC(t, stream, nil, unknownDesc, trInfo)
@@ -1502,35 +1205,42 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	}
 }
 
-// Stop stops the gRPC server. It immediately closes all open
-// connections and listeners.
-// It cancels all active RPCs on the server side and the corresponding
-// pending RPCs on the client side will get notified by connection
-// errors.
+// Stop stops the gRPC server. It immediately closes all open connections and
+// listeners.
+// It cancels all active RPCs on the server side and the corresponding pending
+// RPCs on the client side will get notified by connection errors.
 func (s *Server) Stop() {
 	s.mu.Lock()
-	listeners := s.mu.lis
-	s.mu.lis = nil
-	st := s.mu.conns
-	s.mu.conns = nil
-	// interrupt GracefulStop if Stop and GracefulStop are called concurrently.
-	s.mu.cv.Broadcast()
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
 
-	for lis := range listeners {
+	if s.mu.stopCh == nil {
+		// We've been stopped already.
+		return
+	}
+
+	for lis := range s.mu.listeners {
 		lis.Close()
 	}
-	for c := range st {
-		c.Close()
+	for conn := range s.mu.conns {
+		conn.Close()
 	}
 
-	s.mu.Lock()
-	s.mu.cancel()
-	if s.mu.events != nil {
-		s.mu.events.Finish()
-		s.mu.events = nil
-	}
-	s.mu.Unlock()
+	s.mu.listeners = nil
+	s.mu.conns = nil
+
+	// FIXME(irfansharif): Comment why we close Server.mu.stopCh only after
+	// closing all listeners.
+	close(s.mu.stopCh)
+	s.mu.stopCh = nil
+
+	s.eventsMu.log.Finish()
+	s.eventsMu.log = nil
+
+	// Notify Server.GracefulStop if Server.GracefulStop was running when
+	// Server.Stop was called.
+	s.mu.cv.Broadcast()
 }
 
 // GracefulStop stops the gRPC server gracefully. It stops the server from
@@ -1539,48 +1249,44 @@ func (s *Server) Stop() {
 func (s *Server) GracefulStop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.mu.conns == nil {
+
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+
+	if s.mu.stopCh == nil {
+		// We've been stopped already.
 		return
 	}
-	for lis := range s.mu.lis {
+
+	for lis := range s.mu.listeners {
 		lis.Close()
 	}
-	s.mu.lis = nil
-	s.mu.cancel()
+	s.mu.listeners = nil
+
 	if !s.mu.drain {
-		for c := range s.mu.conns {
-			c.(transport.ServerTransport).Drain()
+		for conn := range s.mu.conns {
+			// FIXME(irfansharif): Drain needs to be supported by the optimized
+			// transport.
+			// FIXME(irfansharif): Use a Drainer interface to avoid type casting.
+			conn.(transport.ServerTransport).Drain()
 		}
 		s.mu.drain = true
 	}
 	for len(s.mu.conns) != 0 {
 		s.mu.cv.Wait()
 	}
+
+	if s.mu.stopCh == nil {
+		// We've been pre-empted by Server.Stop.
+		return
+	}
 	s.mu.conns = nil
-	if s.mu.events != nil {
-		s.mu.events.Finish()
-		s.mu.events = nil
-	}
-}
 
-func init() {
-	internal.TestingCloseConns = func(arg interface{}) {
-		arg.(*Server).testingCloseConns()
-	}
-	internal.TestingUseHandlerImpl = func(arg interface{}) {
-		arg.(*Server).opts.useHandlerImpl = true
-	}
-}
+	close(s.mu.stopCh)
+	s.mu.stopCh = nil
 
-// testingCloseConns closes all existing transports but keeps s.lis
-// accepting new connections.
-func (s *Server) testingCloseConns() {
-	s.mu.Lock()
-	for c := range s.mu.conns {
-		c.Close()
-		delete(s.mu.conns, c)
-	}
-	s.mu.Unlock()
+	s.eventsMu.log.Finish()
+	s.eventsMu.log = nil
 }
 
 // SetHeader sets the header metadata.
@@ -1628,4 +1334,82 @@ func SetTrailer(ctx context.Context, md metadata.MD) error {
 		return Errorf(codes.Internal, "grpc: failed to fetch the stream from the context %v", ctx)
 	}
 	return stream.SetTrailer(md)
+}
+
+func (s *Server) register(sd *ServiceDesc, ss interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logEventf("RegisterService(%q)", sd.ServiceName)
+	if s.mu.serving {
+		grpclog.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
+	}
+	if _, ok := s.services[sd.ServiceName]; ok {
+		grpclog.Fatalf("grpc: Server.RegisterService found duplicate service registration for %q", sd.ServiceName)
+	}
+	srv := &service{
+		server: ss,
+		md:     make(map[string]*MethodDesc),
+		sd:     make(map[string]*StreamDesc),
+		mdata:  sd.Metadata,
+	}
+	for i := range sd.Methods {
+		d := &sd.Methods[i]
+		srv.md[d.MethodName] = d
+	}
+	for i := range sd.Streams {
+		d := &sd.Streams[i]
+		srv.sd[d.StreamName] = d
+	}
+	s.services[sd.ServiceName] = srv
+}
+
+func (s *Server) useTransportAuthenticator(rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	if s.opts.creds == nil {
+		return rawConn, nil, nil
+	}
+	return s.opts.creds.ServerHandshake(rawConn)
+}
+
+// logEventf records an event in s's event log, unless s has been stopped
+// (indicated by a nil log).
+// REQUIRES s.eventsMu is not held.
+func (s *Server) logEventf(format string, a ...interface{}) {
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+
+	if s.eventsMu.log != nil {
+		s.eventsMu.log.Printf(format, a...)
+	}
+}
+
+// logErrorf records an error in s's event log, unless s has been stopped
+// (indicated by a nil log).
+// REQUIRES s.eventsMu is not held.
+func (s *Server) logErrorf(format string, a ...interface{}) {
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+
+	if s.eventsMu.log != nil {
+		s.eventsMu.log.Errorf(format, a...)
+	}
+}
+
+func init() {
+	internal.TestingCloseConns = func(arg interface{}) {
+		arg.(*Server).testingCloseConns()
+	}
+	internal.TestingUseHandlerImpl = func(arg interface{}) {
+		arg.(*Server).opts.useHandlerImpl = true
+	}
+}
+
+// testingCloseConns closes all existing transports but keeps s.lis
+// accepting new connections.
+func (s *Server) testingCloseConns() {
+	s.mu.Lock()
+	for conn := range s.mu.conns {
+		conn.Close()
+		delete(s.mu.conns, conn)
+	}
+	s.mu.Unlock()
 }

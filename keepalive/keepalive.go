@@ -17,7 +17,7 @@
  */
 
 // Package keepalive defines configurable parameters for point-to-point
-// healthcheck.
+// healthchecks.
 package keepalive
 
 import (

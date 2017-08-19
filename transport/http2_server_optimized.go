@@ -110,7 +110,7 @@ type http2ServerOptimized struct {
 
 // newHTTP2ServerOptimized constructs a ServerTransport based on HTTP2. ConnectionError is
 // returned if something goes wrong.
-func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTransportOptimizedd, err error) {
+func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTransportOptimized, err error) {
 	framer := newFramer(conn)
 	// Send initial settings as connection preface to client.
 	var isettings []http2.Setting

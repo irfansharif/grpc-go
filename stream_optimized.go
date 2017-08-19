@@ -34,7 +34,7 @@ import (
 
 // serverStreamOptimized implements a server side Stream.
 type serverStreamOptimized struct {
-	t  transport.ServerTransportOptimizedd
+	t  transport.ServerTransportOptimized
 	s  *transport.StreamOptimized
 	p  *parser
 	cp Compressor
