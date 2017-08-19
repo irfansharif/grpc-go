@@ -15,13 +15,14 @@ const (
 )
 
 type options struct {
-	creds                 credentials.TransportCredentials
-	codec                 Codec
-	cp                    Compressor
-	dc                    Decompressor
-	unaryInt              UnaryServerInterceptor
-	streamInt             StreamServerInterceptor
-	inTapHandle           tap.ServerInHandle
+	creds       credentials.TransportCredentials
+	codec       Codec
+	cp          Compressor
+	dc          Decompressor
+	unaryInt    UnaryServerInterceptor
+	streamInt   StreamServerInterceptor
+	inTapHandle tap.ServerInHandle
+	// FIXME(irfansharif): Stripped out all stats handling for optimized codepaths. Re-add.
 	statsHandler          stats.Handler
 	maxConcurrentStreams  uint32
 	maxReceiveMessageSize int
@@ -34,9 +35,12 @@ type options struct {
 	initialConnWindowSize int32
 }
 
-var defaultServerOptions = options{
-	maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
-	maxSendMessageSize:    defaultServerMaxSendMessageSize,
+func defaultServerOptions() options {
+	return options{
+		maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
+		maxSendMessageSize:    defaultServerMaxSendMessageSize,
+		codec:                 protoCodec{},
+	}
 }
 
 // A ServerOption sets options such as credentials, codec and keepalive parameters, etc.

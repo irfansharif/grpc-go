@@ -1,6 +1,9 @@
 package grpc
 
-import "golang.org/x/net/context"
+import (
+	"golang.org/x/net/context"
+	"google.golang.org/grpc/grpclog"
+)
 
 // service consists of the information of the server serving this service and
 // the methods in this service.
@@ -28,4 +31,31 @@ type ServiceDesc struct {
 	Methods     []MethodDesc
 	Streams     []StreamDesc
 	Metadata    interface{}
+}
+
+func (s *Server) register(sd *ServiceDesc, ss interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logEventf("RegisterService(%q)", sd.ServiceName)
+	if s.mu.serving {
+		grpclog.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
+	}
+	if _, ok := s.services[sd.ServiceName]; ok {
+		grpclog.Fatalf("grpc: Server.RegisterService found duplicate service registration for %q", sd.ServiceName)
+	}
+	srv := &service{
+		server: ss,
+		md:     make(map[string]*MethodDesc),
+		sd:     make(map[string]*StreamDesc),
+		mdata:  sd.Metadata,
+	}
+	for i := range sd.Methods {
+		d := &sd.Methods[i]
+		srv.md[d.MethodName] = d
+	}
+	for i := range sd.Streams {
+		d := &sd.Streams[i]
+		srv.sd[d.StreamName] = d
+	}
+	s.services[sd.ServiceName] = srv
 }

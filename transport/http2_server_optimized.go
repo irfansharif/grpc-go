@@ -44,9 +44,6 @@ import (
 
 // http2ServerOptimized implements the ServerTransport interface with HTTP2.
 type http2ServerOptimized struct {
-	// FIXME(irfansharif): Remove this.
-	ctx context.Context
-
 	conn        net.Conn
 	remoteAddr  net.Addr
 	maxStreamID uint32               // max stream ID ever seen
@@ -152,7 +149,6 @@ func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTrans
 	}
 	var buf bytes.Buffer
 	t := &http2ServerOptimized{
-		ctx:               context.Background(),
 		conn:              conn,
 		remoteAddr:        conn.RemoteAddr(),
 		authInfo:          config.AuthInfo,
@@ -212,9 +208,9 @@ func (t *http2ServerOptimized) operateHeaders(frame *http2.MetaHeadersFrame, han
 	}
 	s.recvCompressionAlgorithm = state.encoding
 	if state.timeoutSet {
-		s.ctx, s.cancel = context.WithTimeout(t.ctx, state.timeout)
+		s.ctx, s.cancel = context.WithTimeout(context.Background(), state.timeout)
 	} else {
-		s.ctx, s.cancel = context.WithCancel(t.ctx)
+		s.ctx, s.cancel = context.WithCancel(context.Background())
 	}
 	pr := &peer.Peer{
 		Addr: t.remoteAddr,
@@ -703,48 +699,53 @@ func (t *http2ServerOptimized) closeStream(s *StreamOptimized) {
 	s.mu.Unlock()
 }
 
-// HandleStreams receives incoming streams using the given handler. This is
-// typically run in a separate goroutine.
-// traceCtx attaches trace to ctx and returns the new context.
-func (t *http2ServerOptimized) HandleStreams(handle func(*StreamOptimized), traceCtx func(context.Context, string) context.Context) {
-	// Check the validity of client preface.
+func isPrefaceValid(conn net.Conn) bool {
 	preface := make([]byte, len(clientPreface))
-	if _, err := io.ReadFull(t.conn, preface); err != nil {
+	if _, err := io.ReadFull(conn, preface); err != nil {
 		// Only log if it isn't a simple tcp accept check (ie: tcp balancer doing open/close socket)
 		if err != io.EOF {
 			errorf("transport: http2ServerOptimized.HandleStreams failed to receive the preface from client: %v", err)
 		}
-		t.Close()
-		return
+		return false
 	}
 	if !bytes.Equal(preface, clientPreface) {
 		errorf("transport: http2ServerOptimized.HandleStreams received bogus greeting from client: %q", preface)
-		t.Close()
+		return false
+	}
+	return true
+}
+
+// HandleStreams receives incoming streams using the given handler. This is
+// typically run in a separate goroutine. tctx attaches trace to ctx and
+// returns the new context.
+func (t *http2ServerOptimized) HandleStreams(handler func(*StreamOptimized), tctx func(context.Context, string) context.Context) {
+	// Check the validity of client preface.
+	if !isPrefaceValid(t.conn) {
 		return
 	}
 
 	frame, err := t.framer.readFrame()
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		t.Close()
 		return
 	}
 	if err != nil {
 		errorf("transport: http2ServerOptimized.HandleStreams failed to read initial settings frame: %v", err)
-		t.Close()
 		return
 	}
 	atomic.StoreUint32(&t.activity, 1)
 	sf, ok := frame.(*http2.SettingsFrame)
 	if !ok {
 		errorf("transport: http2ServerOptimized.HandleStreams saw invalid preface type %T from client", frame)
-		t.Close()
 		return
 	}
 	t.handleSettings(sf)
 
 	for {
-		frame, err := t.framer.readFrame()
+		// FIXME(irfansharif): This is in a pretty tight loop. There are surely
+		// better ways to indicate "activity"
 		atomic.StoreUint32(&t.activity, 1)
+
+		frame, err := t.framer.readFrame()
 		if err != nil {
 			if se, ok := err.(http2.StreamError); ok {
 				t.mu.Lock()
@@ -761,13 +762,11 @@ func (t *http2ServerOptimized) HandleStreams(handle func(*StreamOptimized), trac
 				return
 			}
 			warningf("transport: http2ServerOptimized.HandleStreams failed to read frame: %v", err)
-			t.Close()
 			return
 		}
 		switch frame := frame.(type) {
 		case *http2.MetaHeadersFrame:
-			if t.operateHeaders(frame, handle, traceCtx) {
-				t.Close()
+			if t.operateHeaders(frame, handler, tctx) {
 				break
 			}
 		case *http2.DataFrame:

@@ -25,6 +25,7 @@ import (
 	"io"
 	"io/ioutil"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -538,6 +539,17 @@ func getMaxSize(mcMax, doptMax *int, defaultVal int) *int {
 		return mcMax
 	}
 	return doptMax
+}
+
+func parseServiceMethod(sm string) (service string, method string, valid bool) {
+	if sm != "" && sm[0] == '/' {
+		sm = sm[1:]
+	}
+	pos := strings.LastIndex(sm, "/")
+	if pos == -1 {
+		return "", "", false
+	}
+	return sm[:pos], sm[pos+1:], true
 }
 
 type drainer interface {

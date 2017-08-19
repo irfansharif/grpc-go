@@ -86,13 +86,9 @@ type Server struct {
 // NewServer creates a gRPC server which has no service registered and has not
 // started to accept requests yet.
 func NewServer(opt ...ServerOption) *Server {
-	opts := defaultServerOptions
+	opts := defaultServerOptions()
 	for _, o := range opt {
 		o(&opts)
-	}
-	if opts.codec == nil {
-		// Set the default codec.
-		opts.codec = protoCodec{}
 	}
 	s := &Server{
 		opts:     opts,
@@ -161,9 +157,9 @@ func (s *Server) Serve(lis net.Listener) error {
 	}()
 
 	// For temporary errors we back-off exponentially.
-	const minWaitTime time.Duration = 5 * time.Millisecond
-	const maxWaitTime time.Duration = time.Second
-	waitTime := minWaitTime
+	const minWait time.Duration = 5 * time.Millisecond
+	const maxWait time.Duration = time.Second
+	waitTime := minWait
 
 	t := time.NewTimer(0)
 	// FIXME(irfansharif): To ensure we don't leak resources. Is this true?
@@ -178,8 +174,8 @@ func (s *Server) Serve(lis net.Listener) error {
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				waitTime *= 2
-				if waitTime > maxWaitTime {
-					waitTime = maxWaitTime
+				if waitTime > maxWait {
+					waitTime = maxWait
 				}
 
 				s.logEventf("Accept error: %v; retrying in %v", err, waitTime)
@@ -192,11 +188,11 @@ func (s *Server) Serve(lis net.Listener) error {
 				continue
 			}
 
-			s.logEventf("done serving; Accept = %v", err)
+			s.logEventf("Done serving; Accept = %v", err)
 			return err
 		}
 		// We reset waitTime.
-		waitTime = minWaitTime
+		waitTime = minWait
 
 		// Start a new goroutine to deal with the accepted net.Conn so we don't
 		// stall this listener.Accept loop goroutine.
@@ -204,35 +200,32 @@ func (s *Server) Serve(lis net.Listener) error {
 		// FIXME(irfansharif): This is the point of divergence from the
 		// existing implementation. Put this thing behind some flag so we can
 		// just fall back to default implementation.
-		go s.handleConnOptimized(conn)
+		go s.handleConn(conn)
 	}
 }
 
-// handleConnOptimized is run in its own goroutine and handles a just-accepted
+// handleConn is run in its own goroutine and handles a just-accepted
 // connection that has not had any I/O performed on it yet.
-func (s *Server) handleConnOptimized(conn net.Conn) {
-	authConn, authInfo, err := s.useTransportAuthenticator(conn)
+func (s *Server) handleConn(c net.Conn) {
+	conn, authInfo, err := s.authenticate(c)
 	if err != nil {
-		s.logErrorf("ServerHandshake(%q) failed: %v", conn.RemoteAddr(), err)
-		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", conn.RemoteAddr(), err)
+		s.logErrorf("ServerHandshake(%q) failed: %v", c.RemoteAddr(), err)
+		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", c.RemoteAddr(), err)
+
 		// If serverHandShake returns ErrConnDispatched, keep rawConn open.
 		if err != credentials.ErrConnDispatched {
-			conn.Close()
+			c.Close()
 		}
 		return
 	}
 
-	if s.opts.useHandlerImpl {
-		s.serveUsingHandler(authConn)
-	} else {
-		s.serveHTTP2TransportOptimized(authConn, authInfo)
-	}
+	s.serveHTTP2TransportOptimized(conn, authInfo)
 }
 
 // handleRawConn is run in its own goroutine and handles a just-accepted
 // connection that has not had any I/O performed on it yet.
 func (s *Server) handleRawConn(rawConn net.Conn) {
-	conn, authInfo, err := s.useTransportAuthenticator(rawConn)
+	conn, authInfo, err := s.authenticate(rawConn)
 	if err != nil {
 		s.logErrorf("ServerHandshake(%q) failed: %v", rawConn.RemoteAddr(), err)
 		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", rawConn.RemoteAddr(), err)
@@ -310,23 +303,27 @@ func (s *Server) serveHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) 
 }
 
 func (s *Server) serveStreamsOptimized(st transport.ServerTransportOptimized) {
-	defer s.removeConn(st)
-	defer st.Close()
 	var wg sync.WaitGroup
-	st.HandleStreams(func(stream *transport.StreamOptimized) {
+	handler := func(stream *transport.StreamOptimized) {
 		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			s.handleStreamOptimized(st, stream, s.traceInfoOptimized(st, stream))
+			wg.Done()
 		}()
-	}, func(ctx context.Context, method string) context.Context {
+	}
+	tctx := func(ctx context.Context, method string) context.Context {
 		if !EnableTracing {
 			return ctx
 		}
-		tr := trace.New("grpc.Recv."+methodFamily(method), method)
+		tr := trace.New(fmt.Sprintf("grpc.Recv.%s", methodFamily(method)), method)
 		return trace.NewContext(ctx, tr)
-	})
+	}
+
+	st.HandleStreams(handler, tctx)
 	wg.Wait()
+
+	st.Close()
+	s.removeConn(st)
 }
 
 func (s *Server) serveStreams(st transport.ServerTransport) {
@@ -646,10 +643,6 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 			appErr = status.Error(convertCode(appErr), appErr.Error())
 			appStatus, _ = status.FromError(appErr)
 		}
-		if trInfo != nil {
-			trInfo.tr.LazyLog(stringer(appStatus.Message()), true)
-			trInfo.tr.SetError()
-		}
 		if e := t.WriteStatus(stream, appStatus); e != nil {
 			grpclog.Warningf("grpc: Server.processUnaryRPC failed to write status: %v", e)
 		}
@@ -891,12 +884,12 @@ func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimiz
 		maxSendMessageSize:    s.opts.maxSendMessageSize,
 		statsHandler:          sh,
 	}
-	ss.mu.trInfo = trInfo
 	if ss.cp != nil {
 		ss.cbuf = new(bytes.Buffer)
 	}
 	if trInfo != nil {
-		trInfo.tr.LazyLog(&trInfo.firstLine, false)
+		ss.mu.trInfo = trInfo
+		ss.mu.trInfo.tr.LazyLog(&trInfo.firstLine, false)
 		defer func() {
 			ss.mu.Lock()
 			if err != nil && err != io.EOF {
@@ -1045,31 +1038,19 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 }
 
 func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, trInfo *traceInfo) {
-	sm := stream.Method()
-	if sm != "" && sm[0] == '/' {
-		sm = sm[1:]
-	}
-	pos := strings.LastIndex(sm, "/")
-	if pos == -1 {
-		if trInfo != nil {
-			trInfo.tr.LazyLog(&fmtStringer{"Malformed method name %q", []interface{}{sm}}, true)
-			trInfo.tr.SetError()
-		}
+	service, method, valid := parseServiceMethod(stream.Method())
+	if !valid {
 		errDesc := fmt.Sprintf("malformed method name: %q", stream.Method())
 		if err := t.WriteStatus(stream, status.New(codes.ResourceExhausted, errDesc)); err != nil {
-			if trInfo != nil {
-				trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
-				trInfo.tr.SetError()
-			}
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 		}
 		if trInfo != nil {
+			trInfo.tr.LazyLog(&fmtStringer{"Malformed method name %q", []interface{}{service, method}}, true)
+			trInfo.tr.SetError()
 			trInfo.tr.Finish()
 		}
 		return
 	}
-	service := sm[:pos]
-	method := sm[pos+1:]
 	srv, ok := s.services[service]
 	if !ok {
 		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
@@ -1110,7 +1091,8 @@ func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, str
 		s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, trInfo)
 		return
 	}
-	errDesc := fmt.Sprintf("unknown method %v", method)
+
+	errDesc := fmt.Sprintf("unknown method: %v", method)
 	if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
 		if trInfo != nil {
 			trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
@@ -1209,8 +1191,6 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 func (s *Server) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.eventsMu.Lock()
-	defer s.eventsMu.Unlock()
 
 	if s.mu.stopCh == nil {
 		// We've been stopped already.
@@ -1232,12 +1212,13 @@ func (s *Server) Stop() {
 	close(s.mu.stopCh)
 	s.mu.stopCh = nil
 
-	s.eventsMu.log.Finish()
-	s.eventsMu.log = nil
-
 	// Notify Server.GracefulStop if Server.GracefulStop was running when
 	// Server.Stop was called.
 	s.mu.cv.Signal()
+
+	s.eventsMu.Lock()
+	s.eventsMu.log.Finish()
+	s.eventsMu.Unlock()
 }
 
 // GracefulStop stops the gRPC server gracefully. It stops the server from
@@ -1246,9 +1227,6 @@ func (s *Server) Stop() {
 func (s *Server) GracefulStop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.eventsMu.Lock()
-	defer s.eventsMu.Unlock()
 
 	if s.mu.stopCh == nil {
 		// We've been stopped already.
@@ -1283,10 +1261,14 @@ func (s *Server) GracefulStop() {
 	close(s.mu.stopCh)
 	s.mu.stopCh = nil
 
+	s.eventsMu.Lock()
 	s.eventsMu.log.Finish()
-	s.eventsMu.log = nil
+	s.eventsMu.Unlock()
 }
 
+// FIXME(irfansharif): Should these functions be deprecated? All the way down
+// to the transport layer. What's the right use of this?
+//
 // SetHeader sets the header metadata.
 // When called multiple times, all the provided metadata will be merged.
 // All the metadata will be sent out when one of the following happens:
@@ -1304,6 +1286,9 @@ func SetHeader(ctx context.Context, md metadata.MD) error {
 	return stream.SetHeader(md)
 }
 
+// FIXME(irfansharif): Should these functions be deprecated? All the way down
+// to the transport layer. What's the right use of this?
+//
 // SendHeader sends header metadata. It may be called at most once.
 // The provided md and headers set by SetHeader() will be sent.
 func SendHeader(ctx context.Context, md metadata.MD) error {
@@ -1321,6 +1306,9 @@ func SendHeader(ctx context.Context, md metadata.MD) error {
 	return nil
 }
 
+// FIXME(irfansharif): Should these functions be deprecated? All the way down
+// to the transport layer.
+//
 // SetTrailer sets the trailer metadata that will be sent when an RPC returns.
 // When called more than once, all the provided metadata will be merged.
 func SetTrailer(ctx context.Context, md metadata.MD) error {
@@ -1334,34 +1322,7 @@ func SetTrailer(ctx context.Context, md metadata.MD) error {
 	return stream.SetTrailer(md)
 }
 
-func (s *Server) register(sd *ServiceDesc, ss interface{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.logEventf("RegisterService(%q)", sd.ServiceName)
-	if s.mu.serving {
-		grpclog.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
-	}
-	if _, ok := s.services[sd.ServiceName]; ok {
-		grpclog.Fatalf("grpc: Server.RegisterService found duplicate service registration for %q", sd.ServiceName)
-	}
-	srv := &service{
-		server: ss,
-		md:     make(map[string]*MethodDesc),
-		sd:     make(map[string]*StreamDesc),
-		mdata:  sd.Metadata,
-	}
-	for i := range sd.Methods {
-		d := &sd.Methods[i]
-		srv.md[d.MethodName] = d
-	}
-	for i := range sd.Streams {
-		d := &sd.Streams[i]
-		srv.sd[d.StreamName] = d
-	}
-	s.services[sd.ServiceName] = srv
-}
-
-func (s *Server) useTransportAuthenticator(rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+func (s *Server) authenticate(rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
 	if s.opts.creds == nil {
 		return rawConn, nil, nil
 	}
