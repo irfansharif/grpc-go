@@ -540,6 +540,10 @@ func getMaxSize(mcMax, doptMax *int, defaultVal int) *int {
 	return doptMax
 }
 
+type drainer interface {
+	Drain()
+}
+
 // SupportPackageIsVersion3 is referenced from generated protocol buffer files.
 // The latest support package version is 4.
 // SupportPackageIsVersion3 is kept for compability. It will be removed in the

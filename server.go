@@ -68,8 +68,6 @@ type Server struct {
 		// A CondVar to let GracefulStop() blocks until all the pending RPCs are finished
 		// and all the transport goes away.
 		cv *sync.Cond
-		// FIXME(irfansharif): Doesn't look like this is always protected by the mu.
-		events trace.EventLog
 
 		// This should be used instead of checking if Server.mu.conns == nil or
 		// Server.mu.listeners == nil.
@@ -204,7 +202,8 @@ func (s *Server) Serve(lis net.Listener) error {
 		// stall this listener.Accept loop goroutine.
 		//
 		// FIXME(irfansharif): This is the point of divergence from the
-		// existing implementation.
+		// existing implementation. Put this thing behind some flag so we can
+		// just fall back to default implementation.
 		go s.handleConnOptimized(conn)
 	}
 }
@@ -226,8 +225,6 @@ func (s *Server) handleConnOptimized(conn net.Conn) {
 	if s.opts.useHandlerImpl {
 		s.serveUsingHandler(authConn)
 	} else {
-		// FIXME(irfansharif): Put this thing behind some flag so we can just
-		// fall back to default implementation.
 		s.serveHTTP2TransportOptimized(authConn, authInfo)
 	}
 }
@@ -473,7 +470,7 @@ func (s *Server) removeConn(c io.Closer) {
 	defer s.mu.Unlock()
 	if s.mu.conns != nil {
 		delete(s.mu.conns, c)
-		s.mu.cv.Broadcast()
+		s.mu.cv.Signal()
 	}
 }
 
@@ -1240,7 +1237,7 @@ func (s *Server) Stop() {
 
 	// Notify Server.GracefulStop if Server.GracefulStop was running when
 	// Server.Stop was called.
-	s.mu.cv.Broadcast()
+	s.mu.cv.Signal()
 }
 
 // GracefulStop stops the gRPC server gracefully. It stops the server from
@@ -1263,12 +1260,13 @@ func (s *Server) GracefulStop() {
 	}
 	s.mu.listeners = nil
 
+	// FIXME(irfansharif): Drain needs to be supported by the optimized
+	// transport.
 	if !s.mu.drain {
 		for conn := range s.mu.conns {
-			// FIXME(irfansharif): Drain needs to be supported by the optimized
-			// transport.
-			// FIXME(irfansharif): Use a Drainer interface to avoid type casting.
-			conn.(transport.ServerTransport).Drain()
+			if drainer, ok := conn.(drainer); ok {
+				drainer.Drain()
+			}
 		}
 		s.mu.drain = true
 	}
