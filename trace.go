@@ -46,8 +46,8 @@ func methodFamily(m string) string {
 	return m
 }
 
-// traceInfo contains tracing information for an RPC.
-type traceInfo struct {
+// tracerInfo contains tracing information for an RPC.
+type tracerInfo struct {
 	tr        trace.Trace
 	firstLine firstLine
 }

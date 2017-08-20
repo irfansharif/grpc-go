@@ -49,7 +49,7 @@ type serverStreamOptimized struct {
 
 	mu struct {
 		sync.Mutex
-		trInfo *traceInfo
+		tracer *tracerInfo
 	}
 }
 
@@ -79,12 +79,12 @@ func (ss *serverStreamOptimized) SetTrailer(md metadata.MD) {
 func (ss *serverStreamOptimized) SendMsg(m interface{}) (err error) {
 	defer func() {
 		ss.mu.Lock()
-		if ss.mu.trInfo != nil && ss.mu.trInfo.tr != nil {
+		if ss.mu.tracer != nil && ss.mu.tracer.tr != nil {
 			if err == nil {
-				ss.mu.trInfo.tr.LazyLog(&payload{sent: true, msg: m}, true)
+				ss.mu.tracer.tr.LazyLog(&payload{sent: true, msg: m}, true)
 			} else {
-				ss.mu.trInfo.tr.LazyPrintf(err)
-				ss.mu.trInfo.tr.SetError()
+				ss.mu.tracer.tr.LazyPrintf(err.Error())
+				ss.mu.tracer.tr.SetError()
 			}
 		}
 		ss.mu.Unlock()
@@ -122,12 +122,12 @@ func (ss *serverStreamOptimized) SendMsg(m interface{}) (err error) {
 func (ss *serverStreamOptimized) RecvMsg(m interface{}) (err error) {
 	defer func() {
 		ss.mu.Lock()
-		if ss.mu.trInfo != nil && ss.mu.trInfo.tr != nil {
+		if ss.mu.tracer != nil && ss.mu.tracer.tr != nil {
 			if err == nil {
-				ss.mu.trInfo.tr.LazyLog(&payload{sent: false, msg: m}, true)
+				ss.mu.tracer.tr.LazyLog(&payload{sent: false, msg: m}, true)
 			} else if err != io.EOF {
-				ss.mu.trInfo.tr.LazyPrintf(err)
-				ss.mu.trInfo.tr.SetError()
+				ss.mu.tracer.tr.LazyPrintf(err.Error())
+				ss.mu.tracer.tr.SetError()
 			}
 		}
 		ss.mu.Unlock()

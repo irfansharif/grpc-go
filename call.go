@@ -176,7 +176,7 @@ func invoke(ctx context.Context, method string, args, reply interface{}, cc *Cli
 		// TODO(dsymonds): Arrange for c.traceInfo.firstLine.remoteAddr to be set.
 		defer func() {
 			if e != nil {
-				c.traceInfo.tr.LazyPrintf(err)
+				c.traceInfo.tr.LazyPrintf(e.Error())
 				c.traceInfo.tr.SetError()
 			}
 		}()

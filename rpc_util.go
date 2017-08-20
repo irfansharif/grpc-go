@@ -127,7 +127,7 @@ type callInfo struct {
 	headerMD              metadata.MD
 	trailerMD             metadata.MD
 	peer                  *peer.Peer
-	traceInfo             traceInfo // in trace.go
+	traceInfo             tracerInfo // in trace.go
 	maxReceiveMessageSize *int
 	maxSendMessageSize    *int
 	creds                 credentials.PerRPCCredentials

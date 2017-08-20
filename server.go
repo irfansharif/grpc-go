@@ -307,7 +307,7 @@ func (s *Server) serveStreamsOptimized(st transport.ServerTransportOptimized) {
 	handler := func(stream *transport.StreamOptimized) {
 		wg.Add(1)
 		go func() {
-			s.handleStreamOptimized(st, stream, s.traceInfoOptimized(st, stream))
+			s.handleStreamOptimized(st, stream, s.tracerOptimized(st, stream))
 			wg.Done()
 		}()
 	}
@@ -334,7 +334,7 @@ func (s *Server) serveStreams(st transport.ServerTransport) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.handleStream(st, stream, s.traceInfo(st, stream))
+			s.handleStream(st, stream, s.tracer(st, stream))
 		}()
 	}, func(ctx context.Context, method string) context.Context {
 		if !EnableTracing {
@@ -414,42 +414,42 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // traceInfo returns a traceInfo and associates it with stream, if tracing is enabled.
 // If tracing is not enabled, it returns nil.
-func (s *Server) traceInfoOptimized(st transport.ServerTransportOptimized, stream *transport.StreamOptimized) (trInfo *traceInfo) {
+func (s *Server) tracerOptimized(st transport.ServerTransportOptimized, stream *transport.StreamOptimized) (tracer *tracerInfo) {
 	tr, ok := trace.FromContext(stream.Context())
 	if !ok {
 		return nil
 	}
 
-	trInfo = &traceInfo{
+	tracer = &tracerInfo{
 		tr: tr,
 	}
-	trInfo.firstLine.client = false
-	trInfo.firstLine.remoteAddr = st.RemoteAddr()
+	tracer.firstLine.client = false
+	tracer.firstLine.remoteAddr = st.RemoteAddr()
 
 	if dl, ok := stream.Context().Deadline(); ok {
-		trInfo.firstLine.deadline = dl.Sub(time.Now())
+		tracer.firstLine.deadline = dl.Sub(time.Now())
 	}
-	return trInfo
+	return tracer
 }
 
-// traceInfo returns a traceInfo and associates it with stream, if tracing is enabled.
+// tracer returns a tracer and associates it with stream, if tracing is enabled.
 // If tracing is not enabled, it returns nil.
-func (s *Server) traceInfo(st transport.ServerTransport, stream *transport.Stream) (trInfo *traceInfo) {
+func (s *Server) tracer(st transport.ServerTransport, stream *transport.Stream) (tracer *tracerInfo) {
 	tr, ok := trace.FromContext(stream.Context())
 	if !ok {
 		return nil
 	}
 
-	trInfo = &traceInfo{
+	tracer = &tracerInfo{
 		tr: tr,
 	}
-	trInfo.firstLine.client = false
-	trInfo.firstLine.remoteAddr = st.RemoteAddr()
+	tracer.firstLine.client = false
+	tracer.firstLine.remoteAddr = st.RemoteAddr()
 
 	if dl, ok := stream.Context().Deadline(); ok {
-		trInfo.firstLine.deadline = dl.Sub(time.Now())
+		tracer.firstLine.deadline = dl.Sub(time.Now())
 	}
-	return trInfo
+	return tracer
 }
 
 func (s *Server) addConn(c io.Closer) bool {
@@ -525,7 +525,7 @@ func (s *Server) sendResponse(t transport.ServerTransport, stream *transport.Str
 	return err
 }
 
-func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, srv *service, md *MethodDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, srv *service, md *MethodDesc, tracer *tracerInfo) (err error) {
 	sh := s.opts.statsHandler
 	if sh != nil {
 		begin := &stats.Begin{
@@ -542,14 +542,14 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 			sh.HandleRPC(stream.Context(), end)
 		}()
 	}
-	if trInfo != nil {
-		defer trInfo.tr.Finish()
-		trInfo.firstLine.client = false
-		trInfo.tr.LazyPrintf(trInfo.firstLine.String())
+	if tracer != nil {
+		defer tracer.tr.Finish()
+		tracer.firstLine.client = false
+		tracer.tr.LazyPrintf(tracer.firstLine.String())
 		defer func() {
 			if err != nil && err != io.EOF {
-				trInfo.tr.LazyPrintf(err)
-				trInfo.tr.SetError()
+				tracer.tr.LazyPrintf(err.Error())
+				tracer.tr.SetError()
 			}
 		}()
 	}
@@ -630,8 +630,8 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 			inPayload.Length = len(req)
 			sh.HandleRPC(stream.Context(), inPayload)
 		}
-		if trInfo != nil {
-			trInfo.tr.LazyLog(&payload{sent: false, msg: v}, true)
+		if tracer != nil {
+			tracer.tr.LazyLog(&payload{sent: false, msg: v}, true)
 		}
 		return nil
 	}
@@ -648,8 +648,8 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 		}
 		return appErr
 	}
-	if trInfo != nil {
-		trInfo.tr.LazyPrintf("OK")
+	if tracer != nil {
+		tracer.tr.LazyPrintf("OK")
 	}
 	opts := &transport.Options{
 		Last:  true,
@@ -678,8 +678,8 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 		}
 		return err
 	}
-	if trInfo != nil {
-		trInfo.tr.LazyLog(&payload{sent: true, msg: reply}, true)
+	if tracer != nil {
+		tracer.tr.LazyLog(&payload{sent: true, msg: reply}, true)
 	}
 	// TODO: Should we be logging if writing status failed here, like above?
 	// Should the logging be in WriteStatus?  Should we ignore the WriteStatus
@@ -687,7 +687,7 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 	return t.WriteStatus(stream, status.New(codes.OK, ""))
 }
 
-func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, md *MethodDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, md *MethodDesc, tracer *tracerInfo) (err error) {
 	sh := s.opts.statsHandler
 	if sh != nil {
 		begin := &stats.Begin{
@@ -704,14 +704,14 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 			sh.HandleRPC(stream.Context(), end)
 		}()
 	}
-	if trInfo != nil {
-		defer trInfo.tr.Finish()
-		trInfo.firstLine.client = false
-		trInfo.tr.LazyPrintf(trInfo.firstLine.String())
+	if tracer != nil {
+		defer tracer.tr.Finish()
+		tracer.firstLine.client = false
+		tracer.tr.LazyPrintf(tracer.firstLine.String())
 		defer func() {
 			if err != nil && err != io.EOF {
-				trInfo.tr.LazyPrintf(err)
-				trInfo.tr.SetError()
+				tracer.tr.LazyPrintf(err.Error())
+				tracer.tr.SetError()
 			}
 		}()
 	}
@@ -792,8 +792,8 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 			inPayload.Length = len(req)
 			sh.HandleRPC(stream.Context(), inPayload)
 		}
-		if trInfo != nil {
-			trInfo.tr.LazyLog(&payload{sent: false, msg: v}, true)
+		if tracer != nil {
+			tracer.tr.LazyLog(&payload{sent: false, msg: v}, true)
 		}
 		return nil
 	}
@@ -805,17 +805,17 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 			appErr = status.Error(convertCode(appErr), appErr.Error())
 			appStatus, _ = status.FromError(appErr)
 		}
-		if trInfo != nil {
-			trInfo.tr.LazyPrintf(appStatus.Message())
-			trInfo.tr.SetError()
+		if tracer != nil {
+			tracer.tr.LazyPrintf(appStatus.Message())
+			tracer.tr.SetError()
 		}
 		if e := t.WriteStatus(stream, appStatus); e != nil {
 			grpclog.Warningf("grpc: Server.processUnaryRPC failed to write status: %v", e)
 		}
 		return appErr
 	}
-	if trInfo != nil {
-		trInfo.tr.LazyPrintf("OK")
+	if tracer != nil {
+		tracer.tr.LazyPrintf("OK")
 	}
 	opts := &transport.Options{
 		Last:  true,
@@ -844,8 +844,8 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 		}
 		return err
 	}
-	if trInfo != nil {
-		trInfo.tr.LazyLog(&payload{sent: true, msg: reply}, true)
+	if tracer != nil {
+		tracer.tr.LazyLog(&payload{sent: true, msg: reply}, true)
 	}
 	// TODO: Should we be logging if writing status failed here, like above?
 	// Should the logging be in WriteStatus?  Should we ignore the WriteStatus
@@ -853,7 +853,7 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 	return t.WriteStatus(stream, status.New(codes.OK, ""))
 }
 
-func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, srv *service, sd *StreamDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, srv *service, sd *StreamDesc, tracer *tracerInfo) (err error) {
 	sh := s.opts.statsHandler
 	if sh != nil {
 		begin := &stats.Begin{
@@ -887,17 +887,17 @@ func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimiz
 	if ss.cp != nil {
 		ss.cbuf = new(bytes.Buffer)
 	}
-	if trInfo != nil {
-		ss.mu.trInfo = trInfo
-		ss.mu.trInfo.tr.LazyPrintf(trInfo.firstLine.String())
+	if tracer != nil {
+		ss.mu.tracer = tracer
+		ss.mu.tracer.tr.LazyPrintf(tracer.firstLine.String())
 		defer func() {
 			ss.mu.Lock()
 			if err != nil && err != io.EOF {
-				ss.mu.trInfo.tr.LazyPrintf(err)
-				ss.mu.trInfo.tr.SetError()
+				ss.mu.tracer.tr.LazyPrintf(err.Error())
+				ss.mu.tracer.tr.SetError()
 			}
-			ss.mu.trInfo.tr.Finish()
-			ss.mu.trInfo.tr = nil
+			ss.mu.tracer.tr.Finish()
+			ss.mu.tracer.tr = nil
 			ss.mu.Unlock()
 		}()
 	}
@@ -927,25 +927,25 @@ func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimiz
 			}
 			appErr = appStatus.Err()
 		}
-		if trInfo != nil {
+		if tracer != nil {
 			ss.mu.Lock()
-			ss.mu.trInfo.tr.LazyPrintf(appStatus.Message())
-			ss.mu.trInfo.tr.SetError()
+			ss.mu.tracer.tr.LazyPrintf(appStatus.Message())
+			ss.mu.tracer.tr.SetError()
 			ss.mu.Unlock()
 		}
 		t.WriteStatus(ss.s, appStatus)
 		// TODO: Should we log an error from WriteStatus here and below?
 		return appErr
 	}
-	if trInfo != nil {
+	if tracer != nil {
 		ss.mu.Lock()
-		ss.mu.trInfo.tr.LazyPrintf("OK")
+		ss.mu.tracer.tr.LazyPrintf("OK")
 		ss.mu.Unlock()
 	}
 	return t.WriteStatus(ss.s, status.New(codes.OK, ""))
 }
 
-func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, sd *StreamDesc, trInfo *traceInfo) (err error) {
+func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transport.Stream, srv *service, sd *StreamDesc, tracer *tracerInfo) (err error) {
 	sh := s.opts.statsHandler
 	if sh != nil {
 		begin := &stats.Begin{
@@ -974,22 +974,22 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 		dc:    s.opts.dc,
 		maxReceiveMessageSize: s.opts.maxReceiveMessageSize,
 		maxSendMessageSize:    s.opts.maxSendMessageSize,
-		trInfo:                trInfo,
+		tracer:                tracer,
 		statsHandler:          sh,
 	}
 	if ss.cp != nil {
 		ss.cbuf = new(bytes.Buffer)
 	}
-	if trInfo != nil {
-		trInfo.tr.LazyPrintf(trInfo.firstLine.String())
+	if tracer != nil {
+		tracer.tr.LazyPrintf(tracer.firstLine.String())
 		defer func() {
 			ss.mu.Lock()
 			if err != nil && err != io.EOF {
-				ss.trInfo.tr.LazyPrintf(err)
-				ss.trInfo.tr.SetError()
+				ss.tracer.tr.LazyPrintf(err.Error())
+				ss.tracer.tr.SetError()
 			}
-			ss.trInfo.tr.Finish()
-			ss.trInfo.tr = nil
+			ss.tracer.tr.Finish()
+			ss.tracer.tr = nil
 			ss.mu.Unlock()
 		}()
 	}
@@ -1019,93 +1019,93 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 			}
 			appErr = appStatus.Err()
 		}
-		if trInfo != nil {
+		if tracer != nil {
 			ss.mu.Lock()
-			ss.trInfo.tr.LazyPrintf(appStatus.Message())
-			ss.trInfo.tr.SetError()
+			ss.tracer.tr.LazyPrintf(appStatus.Message())
+			ss.tracer.tr.SetError()
 			ss.mu.Unlock()
 		}
 		t.WriteStatus(ss.s, appStatus)
 		// TODO: Should we log an error from WriteStatus here and below?
 		return appErr
 	}
-	if trInfo != nil {
+	if tracer != nil {
 		ss.mu.Lock()
-		ss.trInfo.tr.LazyPrintf("OK")
+		ss.tracer.tr.LazyPrintf("OK")
 		ss.mu.Unlock()
 	}
 	return t.WriteStatus(ss.s, status.New(codes.OK, ""))
 }
 
-func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, trInfo *traceInfo) {
+func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, stream *transport.StreamOptimized, tracer *tracerInfo) {
 	service, method, valid := parseServiceMethod(stream.Method())
 	if !valid {
 		errDesc := fmt.Sprintf("malformed method name: %q", stream.Method())
 		if err := t.WriteStatus(stream, status.New(codes.ResourceExhausted, errDesc)); err != nil {
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 		}
-		if trInfo != nil {
-			trInfo.tr.LazyPrintf(errDesc)
-			trInfo.tr.SetError()
-			trInfo.tr.Finish()
+		if tracer != nil {
+			tracer.tr.LazyPrintf(errDesc)
+			tracer.tr.SetError()
+			tracer.tr.Finish()
 		}
 		return
 	}
 	srv, ok := s.services[service]
 	if !ok {
 		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
-			s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, trInfo)
+			s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, tracer)
 			return
 		}
 		errDesc := fmt.Sprintf("unknown service: %v", service)
-		if trInfo != nil {
-			trInfo.tr.LazyPrintf(errDesc)
-			trInfo.tr.SetError()
+		if tracer != nil {
+			tracer.tr.LazyPrintf(errDesc)
+			tracer.tr.SetError()
 		}
 		if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
-			if trInfo != nil {
-				trInfo.tr.LazyPrintf(err)
-				trInfo.tr.SetError()
+			if tracer != nil {
+				tracer.tr.LazyPrintf(err.Error())
+				tracer.tr.SetError()
 			}
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 		}
-		if trInfo != nil {
-			trInfo.tr.Finish()
+		if tracer != nil {
+			tracer.tr.Finish()
 		}
 		return
 	}
 	// Unary RPC or Streaming RPC?
 	if md, ok := srv.md[method]; ok {
-		s.processUnaryRPCOptimized(t, stream, srv, md, trInfo)
+		s.processUnaryRPCOptimized(t, stream, srv, md, tracer)
 		return
 	}
 	if sd, ok := srv.sd[method]; ok {
-		s.processStreamingRPCOptimized(t, stream, srv, sd, trInfo)
+		s.processStreamingRPCOptimized(t, stream, srv, sd, tracer)
 		return
 	}
-	if trInfo != nil {
-		trInfo.tr.LazyPrintf(method)
-		trInfo.tr.SetError()
+	errDesc := fmt.Sprintf("unknown method: %v", method)
+	if tracer != nil {
+		tracer.tr.LazyPrintf(errDesc)
+		tracer.tr.SetError()
 	}
 	if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
-		s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, trInfo)
+		s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, tracer)
 		return
 	}
 
-	errDesc := fmt.Sprintf("unknown method: %v", method)
 	if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
-		if trInfo != nil {
-			trInfo.tr.LazyPrintf(err)
-			trInfo.tr.SetError()
+		if tracer != nil {
+			tracer.tr.LazyPrintf(err.Error())
+			tracer.tr.SetError()
 		}
 		grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 	}
-	if trInfo != nil {
-		trInfo.tr.Finish()
+	if tracer != nil {
+		tracer.tr.Finish()
 	}
 }
 
-func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Stream, trInfo *traceInfo) {
+func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Stream, tracer *tracerInfo) {
 	sm := stream.Method()
 	if sm != "" && sm[0] == '/' {
 		sm = sm[1:]
@@ -1113,19 +1113,19 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	pos := strings.LastIndex(sm, "/")
 	if pos == -1 {
 		errDesc := fmt.Sprintf("malformed method name: %q", stream.Method())
-		if trInfo != nil {
-			trInfo.tr.LazyPrintf(errDesc)
-			trInfo.tr.SetError()
+		if tracer != nil {
+			tracer.tr.LazyPrintf(errDesc)
+			tracer.tr.SetError()
 		}
 		if err := t.WriteStatus(stream, status.New(codes.ResourceExhausted, errDesc)); err != nil {
-			if trInfo != nil {
-				trInfo.tr.LazyPrintf(err)
-				trInfo.tr.SetError()
+			if tracer != nil {
+				tracer.tr.LazyPrintf(err.Error())
+				tracer.tr.SetError()
 			}
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 		}
-		if trInfo != nil {
-			trInfo.tr.Finish()
+		if tracer != nil {
+			tracer.tr.Finish()
 		}
 		return
 	}
@@ -1134,53 +1134,53 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	srv, ok := s.services[service]
 	if !ok {
 		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
-			s.processStreamingRPC(t, stream, nil, unknownDesc, trInfo)
+			s.processStreamingRPC(t, stream, nil, unknownDesc, tracer)
 			return
 		}
 		errDesc := fmt.Sprintf("unknown service: %v", service)
-		if trInfo != nil {
-			trInfo.tr.LazyPrintf(errDesc)
-			trInfo.tr.SetError()
+		if tracer != nil {
+			tracer.tr.LazyPrintf(errDesc)
+			tracer.tr.SetError()
 		}
 		if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
-			if trInfo != nil {
-				trInfo.tr.LazyPrintf(err)
-				trInfo.tr.SetError()
+			if tracer != nil {
+				tracer.tr.LazyPrintf(err.Error())
+				tracer.tr.SetError()
 			}
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 		}
-		if trInfo != nil {
-			trInfo.tr.Finish()
+		if tracer != nil {
+			tracer.tr.Finish()
 		}
 		return
 	}
 	// Unary RPC or Streaming RPC?
 	if md, ok := srv.md[method]; ok {
-		s.processUnaryRPC(t, stream, srv, md, trInfo)
+		s.processUnaryRPC(t, stream, srv, md, tracer)
 		return
 	}
 	if sd, ok := srv.sd[method]; ok {
-		s.processStreamingRPC(t, stream, srv, sd, trInfo)
+		s.processStreamingRPC(t, stream, srv, sd, tracer)
 		return
 	}
 	errDesc := fmt.Sprintf("unknown method %v", method)
-	if trInfo != nil {
-		trInfo.tr.LazyPrintf(errDesc)
-		trInfo.tr.SetError()
+	if tracer != nil {
+		tracer.tr.LazyPrintf(errDesc)
+		tracer.tr.SetError()
 	}
 	if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
-		s.processStreamingRPC(t, stream, nil, unknownDesc, trInfo)
+		s.processStreamingRPC(t, stream, nil, unknownDesc, tracer)
 		return
 	}
 	if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
-		if trInfo != nil {
-			trInfo.tr.LazyPrintf(err)
-			trInfo.tr.SetError()
+		if tracer != nil {
+			tracer.tr.LazyPrintf(err.Error())
+			tracer.tr.SetError()
 		}
 		grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 	}
-	if trInfo != nil {
-		trInfo.tr.Finish()
+	if tracer != nil {
+		tracer.tr.Finish()
 	}
 }
 

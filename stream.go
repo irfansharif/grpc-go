@@ -143,7 +143,7 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 	if c.creds != nil {
 		callHdr.Creds = c.creds
 	}
-	var trInfo traceInfo
+	var trInfo tracerInfo
 	if EnableTracing {
 		trInfo.tr = trace.New("grpc.Sent."+methodFamily(method), method)
 		trInfo.firstLine.client = true
@@ -297,7 +297,7 @@ type clientStream struct {
 	finished bool
 	// trInfo.tr is set when the clientStream is created (if EnableTracing is true),
 	// and is set to nil when the clientStream's finish method is called.
-	trInfo traceInfo
+	trInfo tracerInfo
 
 	// statsCtx keeps the user context for stats handling.
 	// All stats collection should use the statsCtx (instead of the stream context)
@@ -555,7 +555,7 @@ type serverStream struct {
 	cbuf                  *bytes.Buffer
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
-	trInfo                *traceInfo
+	tracer                *tracerInfo
 
 	statsHandler stats.Handler
 
@@ -587,14 +587,14 @@ func (ss *serverStream) SetTrailer(md metadata.MD) {
 
 func (ss *serverStream) SendMsg(m interface{}) (err error) {
 	defer func() {
-		if ss.trInfo != nil {
+		if ss.tracer != nil {
 			ss.mu.Lock()
-			if ss.trInfo.tr != nil {
+			if ss.tracer.tr != nil {
 				if err == nil {
-					ss.trInfo.tr.LazyLog(&payload{sent: true, msg: m}, true)
+					ss.tracer.tr.LazyLog(&payload{sent: true, msg: m}, true)
 				} else {
-					ss.trInfo.tr.LazyPrintf(err)
-					ss.trInfo.tr.SetError()
+					ss.tracer.tr.LazyPrintf(err.Error())
+					ss.tracer.tr.SetError()
 				}
 			}
 			ss.mu.Unlock()
@@ -632,14 +632,14 @@ func (ss *serverStream) SendMsg(m interface{}) (err error) {
 
 func (ss *serverStream) RecvMsg(m interface{}) (err error) {
 	defer func() {
-		if ss.trInfo != nil {
+		if ss.tracer != nil {
 			ss.mu.Lock()
-			if ss.trInfo.tr != nil {
+			if ss.tracer.tr != nil {
 				if err == nil {
-					ss.trInfo.tr.LazyLog(&payload{sent: false, msg: m}, true)
+					ss.tracer.tr.LazyLog(&payload{sent: false, msg: m}, true)
 				} else if err != io.EOF {
-					ss.trInfo.tr.LazyPrintf(err)
-					ss.trInfo.tr.SetError()
+					ss.tracer.tr.LazyPrintf(err.Error())
+					ss.tracer.tr.SetError()
 				}
 			}
 			ss.mu.Unlock()
