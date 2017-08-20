@@ -83,7 +83,7 @@ func (ss *serverStreamOptimized) SendMsg(m interface{}) (err error) {
 			if err == nil {
 				ss.mu.trInfo.tr.LazyLog(&payload{sent: true, msg: m}, true)
 			} else {
-				ss.mu.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				ss.mu.trInfo.tr.LazyPrintf(err)
 				ss.mu.trInfo.tr.SetError()
 			}
 		}
@@ -126,7 +126,7 @@ func (ss *serverStreamOptimized) RecvMsg(m interface{}) (err error) {
 			if err == nil {
 				ss.mu.trInfo.tr.LazyLog(&payload{sent: false, msg: m}, true)
 			} else if err != io.EOF {
-				ss.mu.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				ss.mu.trInfo.tr.LazyPrintf(err)
 				ss.mu.trInfo.tr.SetError()
 			}
 		}

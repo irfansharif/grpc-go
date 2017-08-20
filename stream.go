@@ -150,7 +150,7 @@ func newClientStream(ctx context.Context, desc *StreamDesc, cc *ClientConn, meth
 		if deadline, ok := ctx.Deadline(); ok {
 			trInfo.firstLine.deadline = deadline.Sub(time.Now())
 		}
-		trInfo.tr.LazyLog(&trInfo.firstLine, false)
+		trInfo.tr.LazyPrintf(trInfo.firstLine.String())
 		ctx = trace.NewContext(ctx, trInfo.tr)
 		defer func() {
 			if err != nil {
@@ -593,7 +593,7 @@ func (ss *serverStream) SendMsg(m interface{}) (err error) {
 				if err == nil {
 					ss.trInfo.tr.LazyLog(&payload{sent: true, msg: m}, true)
 				} else {
-					ss.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+					ss.trInfo.tr.LazyPrintf(err)
 					ss.trInfo.tr.SetError()
 				}
 			}
@@ -638,7 +638,7 @@ func (ss *serverStream) RecvMsg(m interface{}) (err error) {
 				if err == nil {
 					ss.trInfo.tr.LazyLog(&payload{sent: false, msg: m}, true)
 				} else if err != io.EOF {
-					ss.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+					ss.trInfo.tr.LazyPrintf(err)
 					ss.trInfo.tr.SetError()
 				}
 			}

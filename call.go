@@ -20,6 +20,7 @@ package grpc
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"time"
 
@@ -31,6 +32,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/transport"
 )
+
+// FIXME(irfansharif): Optimize.
 
 // recvResponse receives and parses an RPC response.
 // On error, it returns the error and indicates whether the call should be retried.
@@ -163,17 +166,17 @@ func invoke(ctx context.Context, method string, args, reply interface{}, cc *Cli
 	c.maxReceiveMessageSize = getMaxSize(mc.MaxRespSize, c.maxReceiveMessageSize, defaultClientMaxReceiveMessageSize)
 
 	if EnableTracing {
-		c.traceInfo.tr = trace.New("grpc.Sent."+methodFamily(method), method)
+		c.traceInfo.tr = trace.New(fmt.Sprintf("grpc.Sent.%v", methodFamily(method)), method)
 		defer c.traceInfo.tr.Finish()
 		c.traceInfo.firstLine.client = true
 		if deadline, ok := ctx.Deadline(); ok {
 			c.traceInfo.firstLine.deadline = deadline.Sub(time.Now())
 		}
-		c.traceInfo.tr.LazyLog(&c.traceInfo.firstLine, false)
+		c.traceInfo.tr.LazyPrintf(c.traceInfo.firstLine.String())
 		// TODO(dsymonds): Arrange for c.traceInfo.firstLine.remoteAddr to be set.
 		defer func() {
 			if e != nil {
-				c.traceInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{e}}, true)
+				c.traceInfo.tr.LazyPrintf(err)
 				c.traceInfo.tr.SetError()
 			}
 		}()

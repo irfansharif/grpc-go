@@ -545,10 +545,10 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 	if trInfo != nil {
 		defer trInfo.tr.Finish()
 		trInfo.firstLine.client = false
-		trInfo.tr.LazyLog(&trInfo.firstLine, false)
+		trInfo.tr.LazyPrintf(trInfo.firstLine.String())
 		defer func() {
 			if err != nil && err != io.EOF {
-				trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				trInfo.tr.LazyPrintf(err)
 				trInfo.tr.SetError()
 			}
 		}()
@@ -649,7 +649,7 @@ func (s *Server) processUnaryRPCOptimized(t transport.ServerTransportOptimized, 
 		return appErr
 	}
 	if trInfo != nil {
-		trInfo.tr.LazyLog(stringer("OK"), false)
+		trInfo.tr.LazyPrintf("OK")
 	}
 	opts := &transport.Options{
 		Last:  true,
@@ -707,10 +707,10 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 	if trInfo != nil {
 		defer trInfo.tr.Finish()
 		trInfo.firstLine.client = false
-		trInfo.tr.LazyLog(&trInfo.firstLine, false)
+		trInfo.tr.LazyPrintf(trInfo.firstLine.String())
 		defer func() {
 			if err != nil && err != io.EOF {
-				trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				trInfo.tr.LazyPrintf(err)
 				trInfo.tr.SetError()
 			}
 		}()
@@ -806,7 +806,7 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 			appStatus, _ = status.FromError(appErr)
 		}
 		if trInfo != nil {
-			trInfo.tr.LazyLog(stringer(appStatus.Message()), true)
+			trInfo.tr.LazyPrintf(appStatus.Message())
 			trInfo.tr.SetError()
 		}
 		if e := t.WriteStatus(stream, appStatus); e != nil {
@@ -815,7 +815,7 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 		return appErr
 	}
 	if trInfo != nil {
-		trInfo.tr.LazyLog(stringer("OK"), false)
+		trInfo.tr.LazyPrintf("OK")
 	}
 	opts := &transport.Options{
 		Last:  true,
@@ -889,11 +889,11 @@ func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimiz
 	}
 	if trInfo != nil {
 		ss.mu.trInfo = trInfo
-		ss.mu.trInfo.tr.LazyLog(&trInfo.firstLine, false)
+		ss.mu.trInfo.tr.LazyPrintf(trInfo.firstLine.String())
 		defer func() {
 			ss.mu.Lock()
 			if err != nil && err != io.EOF {
-				ss.mu.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				ss.mu.trInfo.tr.LazyPrintf(err)
 				ss.mu.trInfo.tr.SetError()
 			}
 			ss.mu.trInfo.tr.Finish()
@@ -929,7 +929,7 @@ func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimiz
 		}
 		if trInfo != nil {
 			ss.mu.Lock()
-			ss.mu.trInfo.tr.LazyLog(stringer(appStatus.Message()), true)
+			ss.mu.trInfo.tr.LazyPrintf(appStatus.Message())
 			ss.mu.trInfo.tr.SetError()
 			ss.mu.Unlock()
 		}
@@ -939,7 +939,7 @@ func (s *Server) processStreamingRPCOptimized(t transport.ServerTransportOptimiz
 	}
 	if trInfo != nil {
 		ss.mu.Lock()
-		ss.mu.trInfo.tr.LazyLog(stringer("OK"), false)
+		ss.mu.trInfo.tr.LazyPrintf("OK")
 		ss.mu.Unlock()
 	}
 	return t.WriteStatus(ss.s, status.New(codes.OK, ""))
@@ -981,11 +981,11 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 		ss.cbuf = new(bytes.Buffer)
 	}
 	if trInfo != nil {
-		trInfo.tr.LazyLog(&trInfo.firstLine, false)
+		trInfo.tr.LazyPrintf(trInfo.firstLine.String())
 		defer func() {
 			ss.mu.Lock()
 			if err != nil && err != io.EOF {
-				ss.trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				ss.trInfo.tr.LazyPrintf(err)
 				ss.trInfo.tr.SetError()
 			}
 			ss.trInfo.tr.Finish()
@@ -1021,7 +1021,7 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 		}
 		if trInfo != nil {
 			ss.mu.Lock()
-			ss.trInfo.tr.LazyLog(stringer(appStatus.Message()), true)
+			ss.trInfo.tr.LazyPrintf(appStatus.Message())
 			ss.trInfo.tr.SetError()
 			ss.mu.Unlock()
 		}
@@ -1031,7 +1031,7 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 	}
 	if trInfo != nil {
 		ss.mu.Lock()
-		ss.trInfo.tr.LazyLog(stringer("OK"), false)
+		ss.trInfo.tr.LazyPrintf("OK")
 		ss.mu.Unlock()
 	}
 	return t.WriteStatus(ss.s, status.New(codes.OK, ""))
@@ -1045,7 +1045,7 @@ func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, str
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 		}
 		if trInfo != nil {
-			trInfo.tr.LazyLog(&fmtStringer{"Malformed method name %q", []interface{}{service, method}}, true)
+			trInfo.tr.LazyPrintf(errDesc)
 			trInfo.tr.SetError()
 			trInfo.tr.Finish()
 		}
@@ -1057,14 +1057,14 @@ func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, str
 			s.processStreamingRPCOptimized(t, stream, nil, unknownDesc, trInfo)
 			return
 		}
+		errDesc := fmt.Sprintf("unknown service: %v", service)
 		if trInfo != nil {
-			trInfo.tr.LazyLog(&fmtStringer{"Unknown service %v", []interface{}{service}}, true)
+			trInfo.tr.LazyPrintf(errDesc)
 			trInfo.tr.SetError()
 		}
-		errDesc := fmt.Sprintf("unknown service %v", service)
 		if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
 			if trInfo != nil {
-				trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				trInfo.tr.LazyPrintf(err)
 				trInfo.tr.SetError()
 			}
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
@@ -1084,7 +1084,7 @@ func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, str
 		return
 	}
 	if trInfo != nil {
-		trInfo.tr.LazyLog(&fmtStringer{"Unknown method %v", []interface{}{method}}, true)
+		trInfo.tr.LazyPrintf(method)
 		trInfo.tr.SetError()
 	}
 	if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
@@ -1095,7 +1095,7 @@ func (s *Server) handleStreamOptimized(t transport.ServerTransportOptimized, str
 	errDesc := fmt.Sprintf("unknown method: %v", method)
 	if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
 		if trInfo != nil {
-			trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+			trInfo.tr.LazyPrintf(err)
 			trInfo.tr.SetError()
 		}
 		grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
@@ -1112,14 +1112,14 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 	}
 	pos := strings.LastIndex(sm, "/")
 	if pos == -1 {
+		errDesc := fmt.Sprintf("malformed method name: %q", stream.Method())
 		if trInfo != nil {
-			trInfo.tr.LazyLog(&fmtStringer{"Malformed method name %q", []interface{}{sm}}, true)
+			trInfo.tr.LazyPrintf(errDesc)
 			trInfo.tr.SetError()
 		}
-		errDesc := fmt.Sprintf("malformed method name: %q", stream.Method())
 		if err := t.WriteStatus(stream, status.New(codes.ResourceExhausted, errDesc)); err != nil {
 			if trInfo != nil {
-				trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				trInfo.tr.LazyPrintf(err)
 				trInfo.tr.SetError()
 			}
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
@@ -1137,14 +1137,14 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 			s.processStreamingRPC(t, stream, nil, unknownDesc, trInfo)
 			return
 		}
+		errDesc := fmt.Sprintf("unknown service: %v", service)
 		if trInfo != nil {
-			trInfo.tr.LazyLog(&fmtStringer{"Unknown service %v", []interface{}{service}}, true)
+			trInfo.tr.LazyPrintf(errDesc)
 			trInfo.tr.SetError()
 		}
-		errDesc := fmt.Sprintf("unknown service %v", service)
 		if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
 			if trInfo != nil {
-				trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+				trInfo.tr.LazyPrintf(err)
 				trInfo.tr.SetError()
 			}
 			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
@@ -1163,18 +1163,18 @@ func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Str
 		s.processStreamingRPC(t, stream, srv, sd, trInfo)
 		return
 	}
+	errDesc := fmt.Sprintf("unknown method %v", method)
 	if trInfo != nil {
-		trInfo.tr.LazyLog(&fmtStringer{"Unknown method %v", []interface{}{method}}, true)
+		trInfo.tr.LazyPrintf(errDesc)
 		trInfo.tr.SetError()
 	}
 	if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
 		s.processStreamingRPC(t, stream, nil, unknownDesc, trInfo)
 		return
 	}
-	errDesc := fmt.Sprintf("unknown method %v", method)
 	if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
 		if trInfo != nil {
-			trInfo.tr.LazyLog(&fmtStringer{"%v", []interface{}{err}}, true)
+			trInfo.tr.LazyPrintf(err)
 			trInfo.tr.SetError()
 		}
 		grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
