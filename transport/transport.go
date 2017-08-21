@@ -468,7 +468,7 @@ type ServerTransportOptimized interface {
 	// to add trace events to the given tracer if not nil.
 	//
 	// FIXME(irfansharif): Update comment.
-	HandleStreams(handler func(string, *StreamOptimized))
+	HandleStreams(handler func(*StreamOptimized))
 
 	// WriteHeader sends the header metadata for the given stream.
 	// WriteHeader may not be called on all streams.

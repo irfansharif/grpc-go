@@ -187,7 +187,7 @@ func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTrans
 // HandleStreams receives incoming streams using the given handler. This is
 // typically run in a separate goroutine. tctx attaches trace to ctx and
 // returns the new context.
-func (t *http2ServerOptimized) HandleStreams(handler func(string, *StreamOptimized)) {
+func (t *http2ServerOptimized) HandleStreams(handler func(*StreamOptimized)) {
 	// Check the validity of client preface.
 	if !isPrefaceValid(t.conn) {
 		return
@@ -521,7 +521,7 @@ func (t *http2ServerOptimized) Drain() {
 // operateHeader takes action on the decoded headers.
 func (t *http2ServerOptimized) operateHeaders(
 	frame *http2.MetaHeadersFrame,
-	handler func(string, *StreamOptimized),
+	handler func(*StreamOptimized),
 ) (close bool) {
 	s := &StreamOptimized{
 		id:  frame.Header().StreamID,
@@ -615,7 +615,7 @@ func (t *http2ServerOptimized) operateHeaders(
 		t.adjustWindow(s, uint32(n))
 	}
 
-	handler(s.method, s)
+	handler(s)
 	return
 }
 

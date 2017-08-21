@@ -310,15 +310,18 @@ func (s *Server) serveHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) 
 
 func (s *Server) serveStreamsOptimized(st transport.ServerTransportOptimized) {
 	var wg sync.WaitGroup
-	handler := func(method string, stream *transport.StreamOptimized) {
+	handler := func(stream *transport.StreamOptimized) {
 		wg.Add(1)
 		go func() {
 			var tr trace.Trace
+			var tracer *annotatedTracer
 			if s.opts.tracingEnabled {
-				tr = trace.New(fmt.Sprintf("grpc.Recv.%s", methodFamily(method)), method)
+				tr = trace.New(fmt.Sprintf("grpc.Recv.%s", methodFamily(stream.Method())), stream.Method())
+				tracer = s.annotateTracer(tr, st, stream)
+				tracer.printf(tracer.firstLine.String())
 			}
 			// FIXME(irfansharif): Comment about lifetime of tracer.
-			s.handleStreamOptimized(s.annotateTracer(tr, st, stream), st, stream)
+			s.handleStreamOptimized(tracer, st, stream)
 
 			// FIXME(irfansharif): Maybe use defer if it doesn't show up on profiles.
 			wg.Done()
@@ -327,8 +330,6 @@ func (s *Server) serveStreamsOptimized(st transport.ServerTransportOptimized) {
 			}
 		}()
 	}
-	// FIXME(irfansharif): Try avoiding the need to have it come back into this
-	// package to retrieve the trace.Trace object.
 
 	st.HandleStreams(handler)
 	wg.Wait()
@@ -561,15 +562,6 @@ func (s *Server) processUnaryRPCOptimized(
 				end.Error = toRPCErr(err)
 			}
 			sh.HandleRPC(stream.Context(), end)
-		}()
-	}
-	if tracer != nil {
-		tracer.firstLine.client = false
-		tracer.printf(tracer.firstLine.String())
-		defer func() {
-			if err != nil && err != io.EOF {
-				tracer.errorf(err.Error())
-			}
 		}()
 	}
 	if s.opts.cp != nil {
@@ -916,19 +908,16 @@ func (s *Server) processStreamingRPCOptimized(
 	}
 	if tracer != nil {
 		ss.mu.tracer = tracer
-		// FIXME(irfansharif): Remove accessor on tracer.firstLine.
-		tracer.printf(tracer.firstLine.String())
 		defer func() {
-			if err != nil && err != io.EOF {
-				// FIXME(irfansharif): Document how
-				// {serverStreamOptimized.mu.,}tracer lifetimes intersect and
-				// why we log directly without holding serverStreamOptimized.mu.
-				tracer.errorf(err.Error())
-			}
+			// FIXME(irfansharif): Document how
+			// {serverStreamOptimized.mu.,}tracer lifetimes intersect and
+			// why we log directly without holding serverStreamOptimized.mu.
+			//
 			// FIXME(irfansharif): Document lifetime of
 			// serverStreamOptimized.mu.tracer. Lock is only held when setting
 			// it to nil. Has to be done in this code path before calling
-			// tracer.Finish() in the caller after.
+			// tracer.Finish() in the caller after. Contends with
+			// {Send,Recv}Msg.
 			ss.mu.Lock()
 			ss.mu.tracer = nil
 			ss.mu.Unlock()
@@ -1066,7 +1055,11 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 	return t.WriteStatus(ss.s, status.New(codes.OK, ""))
 }
 
-func (s *Server) handleStreamOptimized(tracer *annotatedTracer, t transport.ServerTransportOptimized, stream *transport.StreamOptimized) {
+func (s *Server) handleStreamOptimized(
+	tracer *annotatedTracer,
+	t transport.ServerTransportOptimized,
+	stream *transport.StreamOptimized,
+) {
 	service, method, valid := parseServiceMethod(stream.Method())
 	if !valid {
 		errDesc := fmt.Sprintf("malformed method name: %q", stream.Method())
@@ -1080,46 +1073,51 @@ func (s *Server) handleStreamOptimized(tracer *annotatedTracer, t transport.Serv
 	}
 	srv, ok := s.services[service]
 	if !ok {
-		if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
-			s.processStreamingRPCOptimized(tracer, t, stream, nil, unknownDesc)
-			return
-		}
-		errDesc := fmt.Sprintf("unknown service: %v", service)
-		if tracer != nil {
-			tracer.errorf(errDesc)
-		}
-		if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
-			if tracer != nil {
-				tracer.errorf(err.Error())
-			}
-			grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
-		}
+		s.handleUnknownStream(tracer, t, stream)
 		return
 	}
 	// Unary RPC or Streaming RPC?
 	if md, ok := srv.md[method]; ok {
-		s.processUnaryRPCOptimized(tracer, t, stream, srv, md)
+		err := s.processUnaryRPCOptimized(tracer, t, stream, srv, md)
+		if tracer != nil && err != nil && err != io.EOF {
+			tracer.errorf(err.Error())
+		}
 		return
 	}
 	if sd, ok := srv.sd[method]; ok {
-		s.processStreamingRPCOptimized(tracer, t, stream, srv, sd)
+		err := s.processStreamingRPCOptimized(tracer, t, stream, srv, sd)
+		if tracer != nil && err != nil && err != io.EOF {
+			tracer.errorf(err.Error())
+		}
 		return
 	}
-	errDesc := fmt.Sprintf("unknown method: %v", method)
+
+	s.handleUnknownStream(tracer, t, stream)
+}
+
+func (s *Server) handleUnknownStream(
+	tracer *annotatedTracer,
+	t transport.ServerTransportOptimized,
+	stream *transport.StreamOptimized,
+) {
+	errDesc := fmt.Sprintf("unknown service/method: %s", stream.Method())
 	if tracer != nil {
 		tracer.errorf(errDesc)
 	}
 	if unknownDesc := s.opts.unknownStreamDesc; unknownDesc != nil {
-		s.processStreamingRPCOptimized(tracer, t, stream, nil, unknownDesc)
+		err := s.processStreamingRPCOptimized(tracer, t, stream, nil, unknownDesc)
+		if tracer != nil && err != nil && err != io.EOF {
+			tracer.errorf(err.Error())
+		}
 		return
 	}
-
 	if err := t.WriteStatus(stream, status.New(codes.Unimplemented, errDesc)); err != nil {
 		if tracer != nil {
 			tracer.errorf(err.Error())
 		}
 		grpclog.Warningf("grpc: Server.handleStream failed to write status: %v", err)
 	}
+	return
 }
 
 func (s *Server) handleStream(t transport.ServerTransport, stream *transport.Stream, tracer *tracerInfo) {

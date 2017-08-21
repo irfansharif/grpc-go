@@ -40,7 +40,9 @@ func (s *Server) register(sd *ServiceDesc, ss interface{}) {
 		grpclog.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
 	}
 
-	s.events.Printf("RegisterService(%q)", sd.ServiceName)
+	if s.opts.tracingEnabled {
+		s.events.Printf("RegisterService(%q)", sd.ServiceName)
+	}
 
 	if _, ok := s.services[sd.ServiceName]; ok {
 		grpclog.Fatalf("grpc: Server.RegisterService found duplicate service registration for %q", sd.ServiceName)

@@ -41,7 +41,8 @@ func defaultServerOptions() options {
 		maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
 		maxSendMessageSize:    defaultServerMaxSendMessageSize,
 		codec:                 protoCodec{},
-		tracingEnabled:        true,
+		// FIXME(irfansharif): Tracing set to false by default.
+		tracingEnabled: false,
 	}
 }
 
