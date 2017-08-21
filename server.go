@@ -52,13 +52,6 @@ import (
 type Server struct {
 	opts options
 
-	// Locking notes: To avoid deadlocks the following lock order must be
-	// obeyed: Server.mu < Server.eventsMu.
-	//
-	// (It is not required to acquire every lock in sequence, but when multiple
-	// locks are held at the same time, it is incorrect to acquire a lock with
-	// a "lesser" value in the sequence after one with "greater" value.)
-
 	mu struct {
 		sync.Mutex
 		listeners map[net.Listener]struct{}
@@ -77,10 +70,8 @@ type Server struct {
 	// FIXME(irfansharif): Talk about lifetime, initialized/written to only
 	// during registration/pre-Server.Start.
 	services map[string]*service // service name -> service info
-	eventsMu struct {
-		sync.Mutex
-		log trace.EventLog
-	}
+	// FIXME(irfansharif): Comment about the lifetime of the event log.
+	events trace.EventLog
 }
 
 // NewServer creates a gRPC server which has no service registered and has not
@@ -101,7 +92,7 @@ func NewServer(opt ...ServerOption) *Server {
 
 	if EnableTracing {
 		_, file, line, _ := runtime.Caller(1)
-		s.eventsMu.log = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
+		s.events = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
 	}
 	return s
 }
@@ -132,10 +123,13 @@ var (
 //
 // Serve always returns non-nil error.
 func (s *Server) Serve(lis net.Listener) error {
-	s.mu.Lock()
-	s.logEventf("serving")
-	s.mu.serving = true
+	if s.events != nil {
+		s.events.Printf("serving")
+		defer s.events.Finish()
+	}
 
+	s.mu.Lock()
+	s.mu.serving = true
 	if s.mu.stopCh == nil {
 		// We've already been stopped.
 		s.mu.Unlock()
@@ -178,7 +172,9 @@ func (s *Server) Serve(lis net.Listener) error {
 					waitTime = maxWait
 				}
 
-				s.logEventf("Accept error: %v; retrying in %v", err, waitTime)
+				if s.events != nil {
+					s.events.Printf("Accept error: %v; retrying in %v", err, waitTime)
+				}
 
 				t.Reset(waitTime)
 				select {
@@ -188,7 +184,9 @@ func (s *Server) Serve(lis net.Listener) error {
 				continue
 			}
 
-			s.logEventf("Done serving; Accept = %v", err)
+			if s.events != nil {
+				s.events.Printf("Done serving; Accept = %v", err)
+			}
 			return err
 		}
 		// We reset waitTime.
@@ -209,7 +207,9 @@ func (s *Server) Serve(lis net.Listener) error {
 func (s *Server) handleConn(c net.Conn) {
 	conn, authInfo, err := s.authenticate(c)
 	if err != nil {
-		s.logErrorf("ServerHandshake(%q) failed: %v", c.RemoteAddr(), err)
+		if s.events != nil {
+			s.events.Errorf("ServerHandshake(%q) failed: %v", c.RemoteAddr(), err)
+		}
 		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", c.RemoteAddr(), err)
 
 		// If serverHandShake returns ErrConnDispatched, keep rawConn open.
@@ -227,7 +227,9 @@ func (s *Server) handleConn(c net.Conn) {
 func (s *Server) handleRawConn(rawConn net.Conn) {
 	conn, authInfo, err := s.authenticate(rawConn)
 	if err != nil {
-		s.logErrorf("ServerHandshake(%q) failed: %v", rawConn.RemoteAddr(), err)
+		if s.events != nil {
+			s.events.Errorf("ServerHandshake(%q) failed: %v", rawConn.RemoteAddr(), err)
+		}
 		grpclog.Warningf("grpc: Server.Serve failed to complete security handshake from %q: %v", rawConn.RemoteAddr(), err)
 		// If serverHandShake returns ErrConnDispatched, keep rawConn open.
 		if err != credentials.ErrConnDispatched {
@@ -260,7 +262,9 @@ func (s *Server) serveHTTP2TransportOptimized(conn net.Conn, authInfo credential
 	}
 	st, err := transport.NewServerTransportOptimized("http2", conn, config)
 	if err != nil {
-		s.logErrorf("NewServerTransport(%q) failed: %v", conn.RemoteAddr(), err)
+		if s.events != nil {
+			s.events.Errorf("NewServerTransport(%q) failed: %v", conn.RemoteAddr(), err)
+		}
 		conn.Close()
 		grpclog.Warningln("grpc: Server.Serve failed to create ServerTransport: ", err)
 		return
@@ -290,7 +294,9 @@ func (s *Server) serveHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) 
 	}
 	st, err := transport.NewServerTransport("http2", c, config)
 	if err != nil {
-		s.logErrorf("NewServerTransport(%q) failed: %v", c.RemoteAddr(), err)
+		if s.events != nil {
+			s.events.Errorf("NewServerTransport(%q) failed: %v", c.RemoteAddr(), err)
+		}
 		c.Close()
 		grpclog.Warningln("grpc: Server.Serve failed to create ServerTransport: ", err)
 		return
@@ -1215,10 +1221,6 @@ func (s *Server) Stop() {
 	// Notify Server.GracefulStop if Server.GracefulStop was running when
 	// Server.Stop was called.
 	s.mu.cv.Signal()
-
-	s.eventsMu.Lock()
-	s.eventsMu.log.Finish()
-	s.eventsMu.Unlock()
 }
 
 // GracefulStop stops the gRPC server gracefully. It stops the server from
@@ -1260,10 +1262,6 @@ func (s *Server) GracefulStop() {
 
 	close(s.mu.stopCh)
 	s.mu.stopCh = nil
-
-	s.eventsMu.Lock()
-	s.eventsMu.log.Finish()
-	s.eventsMu.Unlock()
 }
 
 // FIXME(irfansharif): Should these functions be deprecated? All the way down
@@ -1327,30 +1325,6 @@ func (s *Server) authenticate(rawConn net.Conn) (net.Conn, credentials.AuthInfo,
 		return rawConn, nil, nil
 	}
 	return s.opts.creds.ServerHandshake(rawConn)
-}
-
-// logEventf records an event in s's event log, unless s has been stopped
-// (indicated by a nil log).
-// REQUIRES s.eventsMu is not held.
-func (s *Server) logEventf(format string, a ...interface{}) {
-	s.eventsMu.Lock()
-	defer s.eventsMu.Unlock()
-
-	if s.eventsMu.log != nil {
-		s.eventsMu.log.Printf(format, a...)
-	}
-}
-
-// logErrorf records an error in s's event log, unless s has been stopped
-// (indicated by a nil log).
-// REQUIRES s.eventsMu is not held.
-func (s *Server) logErrorf(format string, a ...interface{}) {
-	s.eventsMu.Lock()
-	defer s.eventsMu.Unlock()
-
-	if s.eventsMu.log != nil {
-		s.eventsMu.log.Errorf(format, a...)
-	}
 }
 
 func init() {
