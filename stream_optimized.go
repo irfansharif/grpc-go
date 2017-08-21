@@ -50,7 +50,7 @@ type serverStreamOptimized struct {
 	// NOTE(irfansharif): Protected by mutex due to {Send,Recv}Msg.
 	mu struct {
 		sync.Mutex
-		tracer *tracerInfoOptimized
+		tracer *annotatedTracer
 	}
 }
 

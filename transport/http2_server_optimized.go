@@ -187,7 +187,7 @@ func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTrans
 // HandleStreams receives incoming streams using the given handler. This is
 // typically run in a separate goroutine. tctx attaches trace to ctx and
 // returns the new context.
-func (t *http2ServerOptimized) HandleStreams(handler func(*StreamOptimized), tctx func(context.Context, string) context.Context) {
+func (t *http2ServerOptimized) HandleStreams(handler func(string, *StreamOptimized)) {
 	// Check the validity of client preface.
 	if !isPrefaceValid(t.conn) {
 		return
@@ -235,7 +235,7 @@ func (t *http2ServerOptimized) HandleStreams(handler func(*StreamOptimized), tct
 		}
 		switch frame := frame.(type) {
 		case *http2.MetaHeadersFrame:
-			if t.operateHeaders(frame, handler, tctx) {
+			if t.operateHeaders(frame, handler) {
 				break
 			}
 		case *http2.DataFrame:
@@ -519,7 +519,10 @@ func (t *http2ServerOptimized) Drain() {
 }
 
 // operateHeader takes action on the decoded headers.
-func (t *http2ServerOptimized) operateHeaders(frame *http2.MetaHeadersFrame, handle func(*StreamOptimized), tctx func(context.Context, string) context.Context) (close bool) {
+func (t *http2ServerOptimized) operateHeaders(
+	frame *http2.MetaHeadersFrame,
+	handler func(string, *StreamOptimized),
+) (close bool) {
 	s := &StreamOptimized{
 		id:  frame.Header().StreamID,
 		buf: newRecvBuffer(),
@@ -611,8 +614,8 @@ func (t *http2ServerOptimized) operateHeaders(frame *http2.MetaHeadersFrame, han
 	s.requestRead = func(n int) {
 		t.adjustWindow(s, uint32(n))
 	}
-	s.ctx = tctx(s.ctx, s.method)
-	handle(s)
+
+	handler(s.method, s)
 	return
 }
 

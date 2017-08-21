@@ -48,27 +48,27 @@ func methodFamily(m string) string {
 	return m
 }
 
-// tracerInfoOptimized contains tracing information for an RPC.
+// annotatedTracer contains tracing information for an RPC.
 //
 // FIXME(irfansharif): Document wrappers. Perhaps add a constructor/wrapper
 // around tr and firstLine? Move it into 'internal/'?
 // FIXME(irfansharif): Use this in client side tracing as well.
-type tracerInfoOptimized struct {
+type annotatedTracer struct {
 	tr        trace.Trace
 	firstLine firstLine
 }
 
-func (t *tracerInfoOptimized) errorf(format string, a ...interface{}) {
+func (t *annotatedTracer) errorf(format string, a ...interface{}) {
 	t.tr.LazyPrintf(format, a...)
 	t.tr.SetError()
 }
 
-func (t *tracerInfoOptimized) printf(format string, a ...interface{}) {
+func (t *annotatedTracer) printf(format string, a ...interface{}) {
 	t.tr.LazyPrintf(format, a...)
 }
 
 // FIXME(irfansharif): Panic on second call?
-func (t *tracerInfoOptimized) finish() {
+func (t *annotatedTracer) finish() {
 	t.tr.Finish()
 }
 

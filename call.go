@@ -165,6 +165,7 @@ func invoke(ctx context.Context, method string, args, reply interface{}, cc *Cli
 	c.maxSendMessageSize = getMaxSize(mc.MaxReqSize, c.maxSendMessageSize, defaultClientMaxSendMessageSize)
 	c.maxReceiveMessageSize = getMaxSize(mc.MaxRespSize, c.maxReceiveMessageSize, defaultClientMaxReceiveMessageSize)
 
+	// FIXME(irfansharif): Pass EnableTracing as an option.
 	if EnableTracing {
 		c.traceInfo.tr = trace.New(fmt.Sprintf("grpc.Sent.%v", methodFamily(method)), method)
 		defer c.traceInfo.tr.Finish()

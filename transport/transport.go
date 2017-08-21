@@ -464,8 +464,11 @@ type ServerTransport interface {
 // Methods may be called concurrently from multiple goroutines, but
 // Write methods for a given Stream will be called serially.
 type ServerTransportOptimized interface {
-	// HandleStreams receives incoming streams using the given handler.
-	HandleStreams(handler func(*StreamOptimized), tctx func(context.Context, string) context.Context)
+	// HandleStreams receives incoming streams using the given handler and is
+	// to add trace events to the given tracer if not nil.
+	//
+	// FIXME(irfansharif): Update comment.
+	HandleStreams(handler func(string, *StreamOptimized))
 
 	// WriteHeader sends the header metadata for the given stream.
 	// WriteHeader may not be called on all streams.

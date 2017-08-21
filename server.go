@@ -90,7 +90,7 @@ func NewServer(opt ...ServerOption) *Server {
 	s.mu.cv = sync.NewCond(&s.mu)
 	s.mu.stopCh = make(chan struct{})
 
-	if EnableTracing {
+	if opts.tracingEnabled {
 		_, file, line, _ := runtime.Caller(1)
 		s.events = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
 	}
@@ -310,29 +310,27 @@ func (s *Server) serveHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) 
 
 func (s *Server) serveStreamsOptimized(st transport.ServerTransportOptimized) {
 	var wg sync.WaitGroup
-	handler := func(stream *transport.StreamOptimized) {
+	handler := func(method string, stream *transport.StreamOptimized) {
 		wg.Add(1)
 		go func() {
-			tracer := s.tracerOptimized(st, stream)
+			var tr trace.Trace
+			if s.opts.tracingEnabled {
+				tr = trace.New(fmt.Sprintf("grpc.Recv.%s", methodFamily(method)), method)
+			}
 			// FIXME(irfansharif): Comment about lifetime of tracer.
-			s.handleStreamOptimized(tracer, st, stream)
+			s.handleStreamOptimized(s.annotateTracer(tr, st, stream), st, stream)
 
 			// FIXME(irfansharif): Maybe use defer if it doesn't show up on profiles.
 			wg.Done()
-			if tracer != nil {
-				tracer.finish()
+			if tr != nil {
+				tr.Finish()
 			}
 		}()
 	}
-	tctx := func(ctx context.Context, method string) context.Context {
-		if !EnableTracing {
-			return ctx
-		}
-		tr := trace.New(fmt.Sprintf("grpc.Recv.%s", methodFamily(method)), method)
-		return trace.NewContext(ctx, tr)
-	}
+	// FIXME(irfansharif): Try avoiding the need to have it come back into this
+	// package to retrieve the trace.Trace object.
 
-	st.HandleStreams(handler, tctx)
+	st.HandleStreams(handler)
 	wg.Wait()
 
 	st.Close()
@@ -425,15 +423,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.serveStreams(st)
 }
 
-// traceInfo returns a traceInfo and associates it with stream, if tracing is enabled.
-// If tracing is not enabled, it returns nil.
-func (s *Server) tracerOptimized(st transport.ServerTransportOptimized, stream *transport.StreamOptimized) (tracer *tracerInfoOptimized) {
-	tr, ok := trace.FromContext(stream.Context())
-	if !ok {
+// traceInfo returns a traceInfo and associates it with stream, if tracing is
+// enabled. If tracing is not enabled, it returns nil.
+//
+// FIXME(irfansharif): Plumb in dependencies so to avoid fetching from
+// stream.Context().
+func (s *Server) annotateTracer(
+	tr trace.Trace,
+	st transport.ServerTransportOptimized,
+	stream *transport.StreamOptimized,
+) (tracer *annotatedTracer) {
+	if tr == nil {
 		return nil
 	}
-
-	tracer = &tracerInfoOptimized{
+	tracer = &annotatedTracer{
 		tr: tr,
 	}
 	tracer.firstLine.client = false
@@ -539,7 +542,7 @@ func (s *Server) sendResponse(t transport.ServerTransport, stream *transport.Str
 }
 
 func (s *Server) processUnaryRPCOptimized(
-	tracer *tracerInfoOptimized,
+	tracer *annotatedTracer,
 	t transport.ServerTransportOptimized,
 	stream *transport.StreamOptimized,
 	srv *service, md *MethodDesc,
@@ -872,7 +875,7 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 }
 
 func (s *Server) processStreamingRPCOptimized(
-	tracer *tracerInfoOptimized,
+	tracer *annotatedTracer,
 	t transport.ServerTransportOptimized,
 	stream *transport.StreamOptimized,
 	srv *service,
@@ -1063,7 +1066,7 @@ func (s *Server) processStreamingRPC(t transport.ServerTransport, stream *transp
 	return t.WriteStatus(ss.s, status.New(codes.OK, ""))
 }
 
-func (s *Server) handleStreamOptimized(tracer *tracerInfoOptimized, t transport.ServerTransportOptimized, stream *transport.StreamOptimized) {
+func (s *Server) handleStreamOptimized(tracer *annotatedTracer, t transport.ServerTransportOptimized, stream *transport.StreamOptimized) {
 	service, method, valid := parseServiceMethod(stream.Method())
 	if !valid {
 		errDesc := fmt.Sprintf("malformed method name: %q", stream.Method())

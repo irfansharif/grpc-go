@@ -28,6 +28,7 @@ type options struct {
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
 	useHandlerImpl        bool // use http.Handler-based server
+	tracingEnabled        bool
 	unknownStreamDesc     *StreamDesc
 	keepaliveParams       keepalive.ServerParameters
 	keepalivePolicy       keepalive.EnforcementPolicy
@@ -40,6 +41,7 @@ func defaultServerOptions() options {
 		maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
 		maxSendMessageSize:    defaultServerMaxSendMessageSize,
 		codec:                 protoCodec{},
+		tracingEnabled:        true,
 	}
 }
 
@@ -143,6 +145,13 @@ func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
 			panic("The unary server interceptor was already set and may not be reset.")
 		}
 		o.unaryInt = i
+	}
+}
+
+// Tracing returns a Server option that allows gRPC tracing to be enabled/disabled.
+func Tracing(enabled bool) ServerOption {
+	return func(o *options) {
+		o.tracingEnabled = enabled
 	}
 }
 
