@@ -519,7 +519,7 @@ func (t *http2ServerOptimized) Drain() {
 }
 
 // operateHeader takes action on the decoded headers.
-func (t *http2ServerOptimized) operateHeaders(frame *http2.MetaHeadersFrame, handle func(*StreamOptimized), traceCtx func(context.Context, string) context.Context) (close bool) {
+func (t *http2ServerOptimized) operateHeaders(frame *http2.MetaHeadersFrame, handle func(*StreamOptimized), tctx func(context.Context, string) context.Context) (close bool) {
 	s := &StreamOptimized{
 		id:  frame.Header().StreamID,
 		buf: newRecvBuffer(),
@@ -611,7 +611,7 @@ func (t *http2ServerOptimized) operateHeaders(frame *http2.MetaHeadersFrame, han
 	s.requestRead = func(n int) {
 		t.adjustWindow(s, uint32(n))
 	}
-	s.ctx = traceCtx(s.ctx, s.method)
+	s.ctx = tctx(s.ctx, s.method)
 	handle(s)
 	return
 }
@@ -1038,12 +1038,12 @@ func isPrefaceValid(conn net.Conn) bool {
 	if _, err := io.ReadFull(conn, preface); err != nil {
 		// Only log if it isn't a simple tcp accept check (ie: tcp balancer doing open/close socket)
 		if err != io.EOF {
-			errorf("transport: http2ServerOptimized.HandleStreams failed to receive the preface from client: %v", err)
+			errorf("transport: failed to receive the preface from client: %v", err)
 		}
 		return false
 	}
 	if !bytes.Equal(preface, clientPreface) {
-		errorf("transport: http2ServerOptimized.HandleStreams received bogus greeting from client: %q", preface)
+		errorf("transport: received bogus greeting from client: %q", preface)
 		return false
 	}
 	return true

@@ -47,9 +47,10 @@ type serverStreamOptimized struct {
 	maxSendMessageSize    int
 	statsHandler          stats.Handler
 
+	// NOTE(irfansharif): Protected by mutex due to {Send,Recv}Msg.
 	mu struct {
 		sync.Mutex
-		tracer *tracerInfo
+		tracer *tracerInfoOptimized
 	}
 }
 
@@ -79,12 +80,11 @@ func (ss *serverStreamOptimized) SetTrailer(md metadata.MD) {
 func (ss *serverStreamOptimized) SendMsg(m interface{}) (err error) {
 	defer func() {
 		ss.mu.Lock()
-		if ss.mu.tracer != nil && ss.mu.tracer.tr != nil {
+		if ss.mu.tracer != nil {
 			if err == nil {
-				ss.mu.tracer.tr.LazyLog(&payload{sent: true, msg: m}, true)
+				ss.mu.tracer.printf(stringifyPayload(true, m))
 			} else {
-				ss.mu.tracer.tr.LazyPrintf(err.Error())
-				ss.mu.tracer.tr.SetError()
+				ss.mu.tracer.errorf(err.Error())
 			}
 		}
 		ss.mu.Unlock()
@@ -122,12 +122,11 @@ func (ss *serverStreamOptimized) SendMsg(m interface{}) (err error) {
 func (ss *serverStreamOptimized) RecvMsg(m interface{}) (err error) {
 	defer func() {
 		ss.mu.Lock()
-		if ss.mu.tracer != nil && ss.mu.tracer.tr != nil {
+		if ss.mu.tracer != nil {
 			if err == nil {
-				ss.mu.tracer.tr.LazyLog(&payload{sent: false, msg: m}, true)
+				ss.mu.tracer.printf(stringifyPayload(true, m))
 			} else if err != io.EOF {
-				ss.mu.tracer.tr.LazyPrintf(err.Error())
-				ss.mu.tracer.tr.SetError()
+				ss.mu.tracer.errorf(err.Error())
 			}
 		}
 		ss.mu.Unlock()
