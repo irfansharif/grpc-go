@@ -42,11 +42,10 @@ import (
 	"google.golang.org/grpc/tap"
 )
 
-// http2ServerOptimized implements the ServerTransport interface with HTTP2.
+// http2ServerOptimized implements the ServerTransport interface with HTTP/2.
 type http2ServerOptimized struct {
 	conn        net.Conn
 	remoteAddr  net.Addr
-	maxStreamID uint32               // max stream ID ever seen
 	authInfo    credentials.AuthInfo // auth info about the connection
 	inTapHandle tap.ServerInHandle
 	// writableChan synchronizes write access to the transport.
@@ -58,8 +57,9 @@ type http2ServerOptimized struct {
 	// blocking forever after Close.
 	closeCh chan struct{}
 	framer  *framer
-	hBuf    *bytes.Buffer  // the buffer for HPACK encoding
-	hEnc    *hpack.Encoder // HPACK encoder
+	hBuf    *bytes.Buffer  // The buffer for HPACK encoding.
+	hEnc    *hpack.Encoder // HPACK encoder.
+
 	// The max number of concurrent streams.
 	maxStreams uint32
 	// controlBuf delivers all the control related tasks (e.g., window
@@ -93,6 +93,7 @@ type http2ServerOptimized struct {
 	mu struct {
 		sync.Mutex
 
+		maxStreamID   uint32 // max stream ID ever seen
 		state         transportState
 		activeStreams map[uint32]*StreamOptimized
 		// the per-stream outbound flow control window size set by the peer.
@@ -550,11 +551,8 @@ func (t *http2ServerOptimized) operateHeaders(
 		s.ctx, s.cancel = context.WithCancel(context.Background())
 	}
 	pr := &peer.Peer{
-		Addr: t.remoteAddr,
-	}
-	// Attach Auth info if there is any.
-	if t.authInfo != nil {
-		pr.AuthInfo = t.authInfo
+		Addr:     t.remoteAddr,
+		AuthInfo: t.authInfo, // Can be nil.
 	}
 	s.ctx = peer.NewContext(s.ctx, pr)
 	// Cache the current stream to the context so that the server application
@@ -598,13 +596,13 @@ func (t *http2ServerOptimized) operateHeaders(
 		t.controlBuf.put(&resetStream{s.id, http2.ErrCodeRefusedStream})
 		return
 	}
-	if s.id%2 != 1 || s.id <= t.maxStreamID {
+	if s.id%2 != 1 || s.id <= t.mu.maxStreamID {
 		t.mu.Unlock()
 		// illegal gRPC stream id.
 		errorf("transport: http2ServerOptimized.HandleStreams received an illegal stream id: %v", s.id)
 		return true
 	}
-	t.maxStreamID = s.id
+	t.mu.maxStreamID = s.id
 	s.sendQuotaPool = newQuotaPool(int(t.mu.streamSendQuota))
 	t.mu.activeStreams[s.id] = s
 	if len(t.mu.activeStreams) == 1 {
@@ -890,12 +888,12 @@ func (t *http2ServerOptimized) applySettings(ss []http2.Setting) {
 	for _, s := range ss {
 		if s.ID == http2.SettingInitialWindowSize {
 			t.mu.Lock()
-			defer t.mu.Unlock()
 			for _, stream := range t.mu.activeStreams {
 				stream.sendQuotaPool.add(int(s.Val) - int(t.mu.streamSendQuota))
 			}
 			t.mu.streamSendQuota = s.Val
 			atomic.AddUint32(&t.outQuotaVersion, 1)
+			t.mu.Unlock()
 		}
 	}
 }
@@ -958,7 +956,7 @@ func (t *http2ServerOptimized) controller() {
 						// The transport is closing.
 						return
 					}
-					sid := t.maxStreamID
+					sid := t.mu.maxStreamID
 					if !i.headsUp {
 						// Stop accepting more streams now.
 						t.mu.state = draining

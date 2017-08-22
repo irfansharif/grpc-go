@@ -161,6 +161,28 @@ func (s *Server) Serve(lis net.Listener) error {
 
 	// Drain the timer so we can re-use it below in the tight loop.
 	// FIXME(irfansharif): Explain this pattern.
+	//
+	// t := time.NewTimer(0)
+	// defer t.Stop()
+	//
+	// const minWaitTime time.Duration = 5 * time.Millisecond
+	// const maxWaitTime time.Duration = 1 * time.Second
+	//
+	// // For temporary errors we wait for temporaryErrWait duration.
+	// var temporaryErrWait time.Duration = minWaitTime
+	// <-t.C
+	// for i := 0; i < 100; i++ {
+	// 	t.Reset(temporaryErrWait)
+	// 	temporaryErrWait *= 2
+	// 	select {
+	// 	case <-t.C:
+	// 		fmt.Println(temporaryErrWait)
+	// 	}
+	// }
+
+	// fmt.Println("~fin~")
+	// FIXME(irfansharif): The Go implementation of timer rests has a bug.
+	// Address it.
 	<-t.C
 
 	for {
@@ -508,6 +530,7 @@ func (s *Server) sendResponseOptimized(t transport.ServerTransportOptimized, str
 		return status.Errorf(codes.ResourceExhausted, "grpc: trying to send message larger than max (%d vs. %d)", len(p), s.opts.maxSendMessageSize)
 	}
 	err = t.Write(stream, p, opts)
+	// FIXME(irfansharif): Return 'p' to some pool instead of having encode allocate internally.
 	if err == nil && outPayload != nil {
 		outPayload.SentTime = time.Now()
 		s.opts.statsHandler.HandleRPC(stream.Context(), outPayload)
