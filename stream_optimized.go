@@ -54,12 +54,13 @@ type serverStreamOptimized struct {
 	}
 }
 
+// FIXME(irfansharif): Anti pattern.
 func (ss *serverStreamOptimized) Context() context.Context {
 	return ss.s.Context()
 }
 
 func (ss *serverStreamOptimized) SendHeader(md metadata.MD) error {
-	return ss.t.WriteHeader(ss.s, md)
+	return ss.t.WriteHeader(ss.s.Context(), ss.s, md)
 }
 
 func (ss *serverStreamOptimized) SetHeader(md metadata.MD) error {
@@ -90,7 +91,7 @@ func (ss *serverStreamOptimized) SendMsg(m interface{}) (err error) {
 		ss.mu.Unlock()
 		if err != nil && err != io.EOF {
 			st, _ := status.FromError(toRPCErr(err))
-			ss.t.WriteStatus(ss.s, st)
+			ss.t.WriteStatus(ss.s.Context(), ss.s, st)
 		}
 	}()
 	var outPayload *stats.OutPayload
@@ -109,7 +110,7 @@ func (ss *serverStreamOptimized) SendMsg(m interface{}) (err error) {
 	if len(out) > ss.maxSendMessageSize {
 		return Errorf(codes.ResourceExhausted, "trying to send message larger than max (%d vs. %d)", len(out), ss.maxSendMessageSize)
 	}
-	if err := ss.t.Write(ss.s, out, &transport.Options{Last: false}); err != nil {
+	if err := ss.t.Write(ss.s.Context(), ss.s, out, &transport.Options{Last: false}); err != nil {
 		return toRPCErr(err)
 	}
 	if outPayload != nil {
@@ -144,7 +145,7 @@ func (ss *serverStreamOptimized) RecvMsg(m interface{}) (err error) {
 		}
 		err = toRPCErr(err)
 		st, _ := status.FromError(err)
-		ss.t.WriteStatus(ss.s, st)
+		ss.t.WriteStatus(ss.s.Context(), ss.s, st)
 		return err
 	}
 	if inPayload != nil {

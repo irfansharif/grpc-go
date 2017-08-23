@@ -13,8 +13,8 @@ type StreamOptimized struct {
 	id uint32
 	// ctx is the associated context of the stream.
 	ctx context.Context
-	// cancel is always nil for client side Stream.
-	cancel context.CancelFunc
+	// cancelCtx is always nil for client side Stream.
+	cancelCtx context.CancelFunc
 	// goAway is closed when the server sent GoAways signal before this stream was initiated.
 	goAway chan struct{}
 	// method records the associated RPC method of the stream.

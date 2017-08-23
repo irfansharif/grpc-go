@@ -468,19 +468,19 @@ type ServerTransportOptimized interface {
 	// to add trace events to the given tracer if not nil.
 	//
 	// FIXME(irfansharif): Update comment.
-	HandleStreams(handler func(*StreamOptimized))
+	HandleStreams(handler func(context.Context, *StreamOptimized))
 
 	// WriteHeader sends the header metadata for the given stream.
 	// WriteHeader may not be called on all streams.
-	WriteHeader(s *StreamOptimized, md metadata.MD) error
+	WriteHeader(ctx context.Context, s *StreamOptimized, md metadata.MD) error
 
 	// Write sends the data for the given stream.
 	// Write may not be called on all streams.
-	Write(s *StreamOptimized, data []byte, opts *Options) error
+	Write(ctx context.Context, s *StreamOptimized, data []byte, opts *Options) error
 
 	// WriteStatus sends the status of a stream to the client. WriteStatus is
 	// the final call made on a stream and always occurs.
-	WriteStatus(s *StreamOptimized, st *status.Status) error
+	WriteStatus(ctx context.Context, s *StreamOptimized, st *status.Status) error
 
 	// Close tears down the transport. Once it is called, the transport
 	// should not be accessed any more. All the pending streams and their

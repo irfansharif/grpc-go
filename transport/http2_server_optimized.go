@@ -106,6 +106,8 @@ type http2ServerOptimized struct {
 	}
 }
 
+// FIXME(irfansharif): A lot of this belongs in HandleStreams.
+//
 // newHTTP2ServerOptimized constructs a ServerTransport based on HTTP2. ConnectionError is
 // returned if something goes wrong.
 func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTransportOptimized, err error) {
@@ -188,7 +190,7 @@ func newHTTP2ServerOptimized(conn net.Conn, config *ServerConfig) (_ ServerTrans
 // HandleStreams receives incoming streams using the given handler. This is
 // typically run in a separate goroutine. tctx attaches trace to ctx and
 // returns the new context.
-func (t *http2ServerOptimized) HandleStreams(handler func(*StreamOptimized)) {
+func (t *http2ServerOptimized) HandleStreams(handler func(context.Context, *StreamOptimized)) {
 	// Check the validity of client preface.
 	if !isPrefaceValid(t.conn) {
 		return
@@ -202,7 +204,6 @@ func (t *http2ServerOptimized) HandleStreams(handler func(*StreamOptimized)) {
 		errorf("transport: http2ServerOptimized.HandleStreams failed to read initial settings frame: %v", err)
 		return
 	}
-	atomic.StoreUint32(&t.activity, 1)
 	sf, ok := frame.(*http2.SettingsFrame)
 	if !ok {
 		errorf("transport: http2ServerOptimized.HandleStreams saw invalid preface type %T from client", frame)
@@ -258,7 +259,7 @@ func (t *http2ServerOptimized) HandleStreams(handler func(*StreamOptimized)) {
 }
 
 // WriteHeader sends the header metadata md back to the client.
-func (t *http2ServerOptimized) WriteHeader(s *StreamOptimized, md metadata.MD) error {
+func (t *http2ServerOptimized) WriteHeader(ctx context.Context, s *StreamOptimized, md metadata.MD) error {
 	s.mu.Lock()
 	if s.mu.headerOk || s.mu.state == streamDone {
 		s.mu.Unlock()
@@ -274,7 +275,7 @@ func (t *http2ServerOptimized) WriteHeader(s *StreamOptimized, md metadata.MD) e
 	}
 	md = s.header
 	s.mu.Unlock()
-	if _, err := wait(s.ctx, nil, nil, t.closeCh, t.writableChan); err != nil {
+	if _, err := wait(ctx, nil, nil, t.closeCh, t.writableChan); err != nil {
 		return err
 	}
 	t.hBuf.Reset()
@@ -302,7 +303,7 @@ func (t *http2ServerOptimized) WriteHeader(s *StreamOptimized, md metadata.MD) e
 // Write converts the data into HTTP2 data frame and sends it out.
 // Non-nil error is returns if it fails (e.g., framing error, transport error).
 // Will do so with minimal flushes.
-func (t *http2ServerOptimized) Write(s *StreamOptimized, data []byte, opts *Options) (err error) {
+func (t *http2ServerOptimized) Write(ctx context.Context, s *StreamOptimized, data []byte, opts *Options) (err error) {
 	// TODO(zhaoq): Support multi-writers for a single stream.
 	var writeHeaderFrame bool
 	s.mu.Lock()
@@ -315,7 +316,7 @@ func (t *http2ServerOptimized) Write(s *StreamOptimized, data []byte, opts *Opti
 	}
 	s.mu.Unlock()
 	if writeHeaderFrame {
-		t.WriteHeader(s, nil)
+		t.WriteHeader(ctx, s, nil)
 	}
 	r := bytes.NewBuffer(data)
 	var (
@@ -329,12 +330,12 @@ func (t *http2ServerOptimized) Write(s *StreamOptimized, data []byte, opts *Opti
 		oqv = atomic.LoadUint32(&t.outQuotaVersion)
 		size := http2MaxFrameLen
 		// Wait until the stream has some quota to send the data.
-		sq, err := wait(s.ctx, nil, nil, t.closeCh, s.sendQuotaPool.acquire())
+		sq, err := wait(ctx, nil, nil, t.closeCh, s.sendQuotaPool.acquire())
 		if err != nil {
 			return err
 		}
 		// Wait until the transport has some quota to send the data.
-		tq, err := wait(s.ctx, nil, nil, t.closeCh, t.sendQuotaPool.acquire())
+		tq, err := wait(ctx, nil, nil, t.closeCh, t.sendQuotaPool.acquire())
 		if err != nil {
 			return err
 		}
@@ -359,7 +360,7 @@ func (t *http2ServerOptimized) Write(s *StreamOptimized, data []byte, opts *Opti
 		t.framer.adjustNumWriters(1)
 		// Got some quota. Try to acquire writing privilege on the
 		// transport.
-		if _, err := wait(s.ctx, nil, nil, t.closeCh, t.writableChan); err != nil {
+		if _, err := wait(ctx, nil, nil, t.closeCh, t.writableChan); err != nil {
 			if _, ok := err.(StreamError); ok {
 				// Return the connection quota back.
 				t.sendQuotaPool.add(ps)
@@ -374,13 +375,13 @@ func (t *http2ServerOptimized) Write(s *StreamOptimized, data []byte, opts *Opti
 			return err
 		}
 		select {
-		case <-s.ctx.Done():
+		case <-ctx.Done():
 			t.sendQuotaPool.add(ps)
 			if t.framer.adjustNumWriters(-1) == 0 {
 				t.controlBuf.put(&flushIO{})
 			}
 			t.writableChan <- 0
-			return ContextErr(s.ctx.Err())
+			return ContextErr(ctx.Err())
 		default:
 		}
 		if oqv != atomic.LoadUint32(&t.outQuotaVersion) {
@@ -422,7 +423,7 @@ func (t *http2ServerOptimized) Write(s *StreamOptimized, data []byte, opts *Opti
 // TODO(zhaoq): Now it indicates the end of entire stream. Revisit if early
 // OK is adopted.
 // FIXME(irfansharif): Must always flush, even during errors?. Panic in pruned codepaths.
-func (t *http2ServerOptimized) WriteStatus(s *StreamOptimized, st *status.Status) error {
+func (t *http2ServerOptimized) WriteStatus(ctx context.Context, s *StreamOptimized, st *status.Status) error {
 	var headersSent, hasHeader bool
 	s.mu.Lock()
 	if s.mu.state == streamDone {
@@ -438,11 +439,11 @@ func (t *http2ServerOptimized) WriteStatus(s *StreamOptimized, st *status.Status
 	s.mu.Unlock()
 
 	if !headersSent && hasHeader {
-		t.WriteHeader(s, nil)
+		t.WriteHeader(ctx, s, nil)
 		headersSent = true
 	}
 
-	if _, err := wait(s.ctx, nil, nil, t.closeCh, t.writableChan); err != nil {
+	if _, err := wait(ctx, nil, nil, t.closeCh, t.writableChan); err != nil {
 		return err
 	}
 	t.hBuf.Reset()
@@ -506,7 +507,7 @@ func (t *http2ServerOptimized) Close() (err error) {
 	err = t.conn.Close()
 	// Cancel all active streams.
 	for _, s := range streams {
-		s.cancel()
+		s.cancelCtx()
 	}
 	return
 }
@@ -522,7 +523,7 @@ func (t *http2ServerOptimized) Drain() {
 // operateHeader takes action on the decoded headers.
 func (t *http2ServerOptimized) operateHeaders(
 	frame *http2.MetaHeadersFrame,
-	handler func(*StreamOptimized),
+	handler func(context.Context, *StreamOptimized),
 ) (close bool) {
 	s := &StreamOptimized{
 		id:  frame.Header().StreamID,
@@ -546,9 +547,9 @@ func (t *http2ServerOptimized) operateHeaders(
 	}
 	s.recvCompressionAlgorithm = state.encoding
 	if state.timeoutSet {
-		s.ctx, s.cancel = context.WithTimeout(context.Background(), state.timeout)
+		s.ctx, s.cancelCtx = context.WithTimeout(context.Background(), state.timeout)
 	} else {
-		s.ctx, s.cancel = context.WithCancel(context.Background())
+		s.ctx, s.cancelCtx = context.WithCancel(context.Background())
 	}
 	pr := &peer.Peer{
 		Addr:     t.remoteAddr,
@@ -564,9 +565,9 @@ func (t *http2ServerOptimized) operateHeaders(
 		s.ctx = metadata.NewIncomingContext(s.ctx, state.mdata)
 	}
 	s.trReader = &transportReader{
-		reader: &recvBufferReader{
-			ctx:  s.ctx,
-			recv: s.buf,
+		reader: &recvBufferReaderOptimized{
+			closeCh: s.ctx.Done(),
+			recv:    s.buf,
 		},
 		windowHandler: func(n int) {
 			t.updateWindow(s, uint32(n))
@@ -613,14 +614,14 @@ func (t *http2ServerOptimized) operateHeaders(
 		t.adjustWindow(s, uint32(n))
 	}
 
-	handler(s)
+	handler(s.ctx, s)
 	return
 }
 
 func (t *http2ServerOptimized) getStream(f http2.Frame) (*StreamOptimized, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.mu.activeStreams == nil {
+	if t.mu.state == closing {
 		// The transport is closing.
 		return nil, false
 	}
@@ -1024,7 +1025,8 @@ func (t *http2ServerOptimized) closeStream(s *StreamOptimized) {
 	// In case stream sending and receiving are invoked in separate
 	// goroutines (e.g., bi-directional streaming), cancel needs to be
 	// called to interrupt the potential blocking on other goroutines.
-	s.cancel()
+	s.cancelCtx()
+
 	s.mu.Lock()
 	if s.mu.state == streamDone {
 		s.mu.Unlock()
