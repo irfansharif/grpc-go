@@ -1,6 +1,8 @@
 package transport
 
-import "errors"
+import (
+	"google.golang.org/grpc/codes"
+)
 
 // recvBufferReaderOptimized implements io.Reader interface to read the data from
 // recvBuffer.
@@ -32,7 +34,7 @@ func (r *recvBufferReaderOptimized) read(p []byte) (n int, err error) {
 	}
 	select {
 	case <-r.closeCh:
-		return 0, errors.New("FIXME(irfansharif)")
+		return 0, streamErrorf(codes.Canceled, "")
 	case <-r.goAway:
 		return 0, ErrStreamDrain
 	case m := <-r.recv.get():

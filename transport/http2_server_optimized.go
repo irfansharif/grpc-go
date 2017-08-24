@@ -98,6 +98,13 @@ type http2ServerOptimized struct {
 		activeStreams map[uint32]*StreamOptimized
 		// the per-stream outbound flow control window size set by the peer.
 		streamSendQuota uint32
+		// drainChan is initialized when drain(...) is called the first time.
+		// After which the server writes out the first GoAway(with ID 2^31-1) frame.
+		// Then an independent goroutine will be launched to later send the second GoAway.
+		// During this time we don't want to write another first GoAway(with ID 2^31 -1) frame.
+		// Thus call to drain(...) will be a no-op if drainChan is already initialized since draining is
+		// already underway.
+		drainChan chan struct{}
 		// idle is the time instant when the connection went idle.
 		// This is either the begining of the connection or when the number of
 		// RPCs go down to 0.
@@ -482,6 +489,7 @@ func (t *http2ServerOptimized) WriteStatus(ctx context.Context, s *StreamOptimiz
 		t.Close()
 		return err
 	}
+
 	// NOTE: This is the final flush.
 	t.framer.writer.Flush()
 
@@ -517,7 +525,17 @@ func (t *http2ServerOptimized) RemoteAddr() net.Addr {
 }
 
 func (t *http2ServerOptimized) Drain() {
-	panic("Drain() is not implemented for http2ServerOptimized")
+	t.drain(http2.ErrCodeNo, []byte{})
+}
+
+func (t *http2ServerOptimized) drain(code http2.ErrCode, debugData []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.mu.drainChan != nil {
+		return
+	}
+	t.mu.drainChan = make(chan struct{})
+	t.controlBuf.put(&goAway{code: code, debugData: debugData, headsUp: true})
 }
 
 // operateHeader takes action on the decoded headers.
@@ -786,7 +804,8 @@ func (t *http2ServerOptimized) handleSettings(f *http2.SettingsFrame) {
 
 func (t *http2ServerOptimized) handlePing(f *http2.PingFrame) {
 	if f.IsAck() {
-		if f.Data == goAwayPing.data {
+		if f.Data == goAwayPing.data && t.mu.drainChan != nil {
+			close(t.mu.drainChan)
 			return
 		}
 		// Maybe it's a BDP ping.
@@ -984,6 +1003,7 @@ func (t *http2ServerOptimized) controller() {
 						defer timer.Stop()
 						select {
 						case <-timer.C:
+						case <-t.mu.drainChan:
 						case <-t.closeCh:
 							return
 						}
